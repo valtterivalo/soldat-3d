@@ -41,13 +41,16 @@ static int receive_state(Network *client, Game *game) {
 
 typedef struct {unsigned char *bytes;size_t size;} Datagram;
 
-static Datagram receive_datagram(Network *receiver) {
+static Datagram receive_datagram_at(Network *receiver, int line) {
     double started=network_time();
     unsigned char bytes[65536];
     for (;;) {
         ssize_t size=recvfrom(network_socket(receiver),bytes,sizeof(bytes),0,NULL,NULL);
         if (size<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) {
-            check(network_time()-started<(double)SRC_DISCONNECTION_TIME/TICK_RATE,"fixture receives datagram before source disconnect interval");
+            if (network_time()-started >= (double)SRC_DISCONNECTION_TIME/TICK_RATE) {
+                fprintf(stderr, "Network contract failed: fixture receives datagram before source disconnect interval (caller line %d)\n", line);
+                exit(EXIT_FAILURE);
+            }
             continue;
         }
         check(size>=0,"fixture receives complete UDP datagram");
@@ -57,6 +60,8 @@ static Datagram receive_datagram(Network *receiver) {
         return packet;
     }
 }
+
+#define receive_datagram(receiver) receive_datagram_at(receiver, __LINE__)
 
 static void send_datagram(Network *sender,Network *receiver,Datagram packet) {
     struct sockaddr_in6 address={.sin6_family=AF_INET6,.sin6_port=htons(network_port(receiver))};

@@ -23,7 +23,7 @@
 enum { MAGIC = 0x534f4c33, VERSION = NETWORK_PROTOCOL_VERSION, DATAGRAM = 1200, HEADER = NETWORK_PACKET_HEADER, BUTTONS = 11, COMMAND_SIZE = 104, INTERPOLATION_TICKS = 2, REPAIR_GROUP = 255, EVENT_SIZE = 64 };
 typedef enum { HELLO = 1, WELCOME, COMMAND, STATE, LEAVE, REJECT, REPAIR, INPUT_ACK, EVENTS, EVENT_ACK, CHALLENGE, CONNECT } PacketKind;
 typedef enum { HOST, CLIENT } Role;
-typedef enum { DELIVERY_UNMEASURED, DELIVERY_CLEAN, DELIVERY_LOSS } Delivery;
+typedef enum { DELIVERY_PROTECTED, DELIVERY_CLEAN } Delivery;
 typedef struct {
     uint64_t sequence, view_frame, view_start_frame;
     Input input;
@@ -389,7 +389,7 @@ int network_receive_at(Network *net, Game *game, double now) {
                 uint64_t distance = sequence - peer->receipt_previous;
                 uint64_t valid = sequence >= 64 ? UINT64_MAX : (UINT64_C(1) << sequence) - 1;
                 uint64_t settled = distance < 64 ? valid & (UINT64_MAX << distance) : 0;
-                if (settled) peer->delivery = (peer->receipt_mask & settled) == settled ? DELIVERY_CLEAN : DELIVERY_LOSS;
+                if (settled) peer->delivery = (peer->receipt_mask & settled) == settled ? DELIVERY_CLEAN : DELIVERY_PROTECTED;
             }
             Snapshot commands = {0};
             if (!snapshot_unpack(&commands, data, size)) continue;
@@ -921,7 +921,7 @@ const Game *network_render(Network *net, const Game *predicted, double now, floa
         const StateFrame *state = &net->states[i];
         if (!state->sequence || state->sequence + SRC_MAX_OLDPOS < net->completed_frame || state->map != net->map) continue;
         target = fmin(target, (double)state->game.tick + (now - state->receipt) * TICK_RATE);
-        if (state->gap > delay) delay = state->gap;
+        if (state->gap + 1 > delay) delay = state->gap + 1;
     }
     target -= (double)delay;
     if (!net->render_time) net->view_tick = fmax(0, target);

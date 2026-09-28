@@ -96,6 +96,8 @@ int main(int argc,char **argv) {
     host=lobby_host_open(network_socket(server),"127.0.0.1",directory_port,"Original rules");
     lobby_host_update(host,now);
     while (!lobby_directory_count(directory)) {lobby_directory_pump(directory,now);network_receive(server,&game);lobby_directory_pump(directory,now);}
+    lobby_close(browser);
+    browser=lobby_open("127.0.0.1",directory_port);
     double heartbeat=now+(double)SRC_DISCONNECTION_TIME/TICK_RATE/3;
     game.mode=MODE_RAMBO;
     lobby_host_update(host,heartbeat);
@@ -105,6 +107,7 @@ int main(int argc,char **argv) {
         ssize_t received=recvfrom(network_socket(server),packet,sizeof(packet),0,(struct sockaddr *)&source,&size);
         if (received<0 && (errno==EAGAIN || errno==EWOULDBLOCK)) continue;
         check(received>=0,"heartbeat query reaches game socket");
+        if (source.sin6_port!=htons(directory_port)) continue;
         check(lobby_server_packet(network_socket(server),packet,(size_t)received,&source,&game,"Original rules",1,6),"game server answers heartbeat ownership challenge");
         break;
     }
