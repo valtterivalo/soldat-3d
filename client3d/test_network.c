@@ -263,13 +263,14 @@ static void prediction_contract(void) {
     int local = network_actor(peer);
     host.actors[local].position = host.actors[local].previous = v3(0, 10000, 0);
     host.actors[local].spawn_protection_ticks = -1;
+    game_equip(&host.actors[local], BARRETT, COLT);
     host.actors[local].slots[0].fire_count = 0;
     network_broadcast(server, &host);
     check(receive_state(peer, &client), "prediction fixture receives authoritative weapon state");
     int ammo = client.actors[local].slots[0].ammo;
-    network_send_input(peer, &client, (Input){.held = INPUT_FIRE, .pressed = INPUT_FIRE}, AK74, COLT);
-    check(client.event_count == 1 && client.events[0].kind == EVENT_SHOT &&
-        client.actors[local].slots[0].ammo == ammo - 1, "local shot audio, flash and ammo respond before a server round trip");
+    network_send_input(peer, &client, (Input){.held = INPUT_FIRE, .pressed = INPUT_FIRE}, BARRETT, COLT);
+    check(client.event_count == 1 && client.events[0].kind == EVENT_SHOT && client.events[0].weapon == BARRETT &&
+        client.actors[local].slots[0].ammo == ammo - 1, "local Barrett audio, flash and ammo respond on the first press before a server round trip");
     check(!client.projectile_count, "local weapon feedback never invents authoritative projectile hits");
     while (network_received_sequence(server, local) < 1) network_receive(server, &host);
     Input inputs[ACTOR_COUNT] = {0};
@@ -297,7 +298,7 @@ static void prediction_contract(void) {
     ++host.tick;
     host.actors[0].health -= 10;
     uint64_t hit_tick = host.tick;
-    combat_event(&host, (GameEvent){EVENT_HIT, host.actors[0].position, local, 0, AK74});
+    combat_event(&host, (GameEvent){EVENT_HIT, host.actors[0].position, local, 0, BARRETT});
     network_broadcast(server, &host);
     for (;;) {
         Datagram packet = receive_datagram(peer);
@@ -334,7 +335,7 @@ static void prediction_contract(void) {
     check(!scene->event_count, "retransmitted hit confirmation never duplicates presentation");
     network_close(server);
     while (network_status(peer) == NET_CONNECTED) network_receive(peer, &client);
-    network_send_input(peer, &client, (Input){.held = INPUT_FIRE}, AK74, COLT);
+    network_send_input(peer, &client, (Input){.held = INPUT_FIRE}, BARRETT, COLT);
     check(!client.event_count && !network_actor_pose(peer, local) &&
         !network_render(peer, &client, now + 8.0 / TICK_RATE, 1)->event_count,
         "disconnected sessions cannot repeat stale effects");

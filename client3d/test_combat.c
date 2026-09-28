@@ -100,12 +100,20 @@ int main(void) {
     game_free(&game);
 
     game = shooting_game(BARRETT);
-    for (int tick = 0; tick < weapons[BARRETT].startup_time; tick++) {
-        step(&game, INPUT_FIRE, 0);
-        check("Barrett startup cannot fire early", game.projectile_count == 0);
-    }
+    step(&game, INPUT_FIRE, INPUT_FIRE);
+    check("ready Barrett fires on the first pressed tick", game.projectile_count == 1 &&
+        game.actors[0].slots[0].ammo == weapons[BARRETT].ammo - 1);
+    step(&game, 0, 0);
+    for (int tick = 2; tick < weapons[BARRETT].fire_interval; tick++)
+        step(&game, INPUT_FIRE, tick == 2 ? INPUT_FIRE : 0);
+    check("instant Barrett trigger preserves the shot cooldown",
+        game.actors[0].slots[0].ammo == weapons[BARRETT].ammo - 1);
     step(&game, INPUT_FIRE, 0);
-    check("Barrett fires after source startup countdown", game.projectile_count == 1);
+    check("Barrett fires immediately when the released trigger and cooldown permit",
+        game.actors[0].slots[0].ammo == weapons[BARRETT].ammo - 2);
+    for (int tick = 0; tick <= weapons[BARRETT].fire_interval; tick++) step(&game, INPUT_FIRE, 0);
+    check("holding Barrett fire cannot repeat after cooldown",
+        game.actors[0].slots[0].ammo == weapons[BARRETT].ammo - 2);
     game_free(&game);
 
     game = shooting_game(M79);

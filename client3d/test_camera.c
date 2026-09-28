@@ -57,8 +57,7 @@ int main(void)
         actor=ready;actor.animation=transitions[i];
         assert(camera_focus_fov(&actor,FOCUS_PRECISION)==72);
     }
-    actor=ready;actor.slots[0].startup_count=19;
-    assert(camera_focus_fov(&actor,FOCUS_PRECISION)<72);
+    actor=ready;
     actor.slots[0].fire_count=1;
     assert(camera_focus_fov(&actor,FOCUS_PRECISION)==72);
     actor.slots[0].fire_count=0;
