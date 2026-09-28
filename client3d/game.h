@@ -16,11 +16,11 @@ static inline Vec3 direction(float yaw, float pitch) {
     return v3(sinf(yaw)*cosf(pitch), sinf(pitch), cosf(yaw)*cosf(pitch));
 }
 
-enum { TICK_RATE = 60, ACTOR_COUNT = 32, WEAPON_COUNT = 23, PLAYER_NAME_LENGTH = 24 };
+enum { TICK_RATE = 60, ACTOR_COUNT = 32, PLAYER_NAME_LENGTH = 24 };
 typedef enum {
     EAGLE, MP5, AK74, STEYRAUG, SPAS12, RUGER77, M79, BARRETT,
     M249, MINIGUN, COLT, KNIFE, CHAINSAW, LAW, BOW2, BOW,
-    FLAMER, M2, NOWEAPON, FRAGGRENADE, CLUSTERGRENADE, CLUSTER, THROWNKNIFE
+    FLAMER, M2, NOWEAPON, FRAGGRENADE, CLUSTERGRENADE, CLUSTER, THROWNKNIFE, WEAPON_COUNT
 } WeaponId;
 
 typedef struct {

@@ -136,7 +136,8 @@ static WorldSolid *solid_append(size_t *capacity)
     if (world_solid_count==*capacity) {
         *capacity=*capacity ? *capacity*2 : 256;
         WorldSolid *solids=realloc(world_solids,*capacity*sizeof(*solids));
-        if (!solids) abort();world_solids=solids;
+        if (!solids) abort();
+        world_solids=solids;
     }
     WorldSolid *solid=&world_solids[world_solid_count++];*solid=(WorldSolid){0};return solid;
 }
