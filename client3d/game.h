@@ -31,6 +31,7 @@ typedef struct {
     float inherited_velocity, modifier_head, modifier_chest, modifier_legs;
 } WeaponDef;
 extern const WeaponDef weapons[WEAPON_COUNT];
+typedef struct { float aim_deviation, pellet_angle, max_angle; } WeaponSpread;
 
 typedef enum { AIRBORNE, GROUNDED } Contact;
 typedef enum { STANDING, CROUCHING, PRONE } Pose;
@@ -200,6 +201,7 @@ void game_restart(Game *game);
 void game_select_team(Game *game, int actor, Team team);
 Input bot_input(Game *game, int index);
 void combat_step(Game *game, const Input inputs[ACTOR_COUNT]);
+WeaponSpread combat_spread(const Actor *actor, uint32_t held);
 void combat_history_enable(Game *game);
 void combat_history_record(Game *game);
 void combat_predict_actor(Game *game, int index, Input input);

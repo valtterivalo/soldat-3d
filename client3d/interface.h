@@ -9,7 +9,7 @@
 typedef enum {
     UI_HEALTH, UI_AMMO, UI_JET, UI_HEALTH_BAR, UI_RELOAD_BAR,
     UI_JET_BAR, UI_FIRE_BAR, UI_FIRE_FRAME, UI_GRENADE,
-    UI_CURSOR, UI_MENU_CURSOR, UI_BACK, UI_TITLE_LEFT, UI_TITLE_RIGHT,
+    UI_MENU_CURSOR, UI_BACK, UI_TITLE_LEFT, UI_TITLE_RIGHT,
     UI_VEST_BAR, UI_CLUSTER_GRENADE,
     UI_FLAG, UI_NOFLAG,
     UI_TEXTURE_COUNT
@@ -18,7 +18,7 @@ typedef enum {
 typedef struct {
     Font font;
     Texture2D textures[UI_TEXTURE_COUNT], guns[14];
-    float asset_scale, cursor_scale, title_scale;
+    float asset_scale, title_scale;
 } Interface;
 
 typedef enum { INTERFACE_IDLE, INTERFACE_PLAY } InterfaceAction;

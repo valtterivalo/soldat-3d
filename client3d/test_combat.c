@@ -136,6 +136,89 @@ int main(void) {
     check("SPAS inserts a shell on source animation frame fourteen", game.actors[0].slots[0].ammo == 7);
     game_free(&game);
 
+    Vec3 pellet_pattern[6];
+    for (int view = 0; view < 6; ++view) {
+        game = shooting_game(SPAS12);
+        Actor *shooter = &game.actors[0];
+        shooter->yaw = (view % 3) * .7853981634f;
+        shooter->pitch = view >= 3 ? 1.0471975512f : 0;
+        Vec3 forward = direction(shooter->yaw, shooter->pitch);
+        Vec3 right = direction(shooter->yaw - 1.5707963268f, 0);
+        Vec3 up = v3(-sinf(shooter->pitch) * sinf(shooter->yaw), cosf(shooter->pitch),
+            -sinf(shooter->pitch) * cosf(shooter->yaw));
+        WeaponSpread spread = combat_spread(shooter, 0);
+        step(&game, INPUT_FIRE, INPUT_FIRE);
+        check("SPAS cone keeps six pellets", game.projectile_count == 6);
+        for (int i = 0; i < 6; ++i) {
+            Vec3 velocity = scale(game.projectiles[i].velocity, 1 / SRC_BULLET_DAMPING);
+            velocity.y += SRC_BULLET_GRAVITY;
+            equal("SPAS cone preserves pellet speed", length(velocity), weapons[SPAS12].speed);
+            check("SPAS pellets stay inside the displayed cone",
+                dot(velocity, forward) / length(velocity) >= cosf(spread.max_angle) - .000001f);
+            Vec3 local = v3(dot(velocity, right), dot(velocity, up), dot(velocity, forward));
+            if (view == 0) pellet_pattern[i] = local;
+            else equal("SPAS pellet pattern rotates with aim, including steep shots", length(sub(local, pellet_pattern[i])), 0);
+        }
+        equal("SPAS preserves its movement kick", length(sub(shooter->velocity,
+            v3(-forward.x * weapons[SPAS12].speed * .0412f,
+               -forward.y * weapons[SPAS12].speed * .041f,
+               -forward.z * weapons[SPAS12].speed * .0412f))), 0);
+        game_free(&game);
+    }
+
+    game = shooting_game(RUGER77);
+    equal("Ruger retains precise stationary shots", combat_spread(&game.actors[0], 0).max_angle, 0);
+    equal("Ruger movement accuracy tuned for 3D", weapons[RUGER77].movement_acc, .02f);
+    game.actors[0].animation = MOVE_RUN;
+    check("Ruger movement still costs accuracy", combat_spread(&game.actors[0], 0).max_angle > 0);
+    game_free(&game);
+
+    for (int id = EAGLE; id <= COLT; ++id) {
+        game = shooting_game((WeaponId)id);
+        Actor *shooter = &game.actors[0];
+        shooter->yaw = .7f;shooter->pitch = .8f;shooter->animation = MOVE_RUN;
+        shooter->bink_count = 80;shooter->fuel = 100;shooter->velocity = v3(2, 3, 4);
+        shooter->slots[0].startup_count = 0;shooter->slots[0].ammo = weapons[id].ammo;
+        WeaponSpread spread = combat_spread(shooter, INPUT_JETS);
+        Vec3 forward = direction(shooter->yaw, shooter->pitch);
+        step(&game, INPUT_FIRE | INPUT_JETS, INPUT_FIRE);
+        check("spread test fires the selected weapon", game.projectile_count > 0);
+        for (size_t i = 0; i < game.projectile_count; ++i) {
+            Vec3 velocity = scale(game.projectiles[i].velocity, 1 / SRC_BULLET_DAMPING);
+            velocity.y += SRC_BULLET_GRAVITY;
+            velocity = sub(velocity, scale(v3(2, 3, 4), weapons[id].inherited_velocity));
+            check("displayed spread bounds movement, jets, bink and pellet scatter",
+                dot(velocity, forward) / length(velocity) >= cosf(spread.max_angle) - .000001f);
+        }
+        game_free(&game);
+    }
+
+    game = shooting_game(MINIGUN);
+    for (int tick = 0; tick < weapons[MINIGUN].startup_time; ++tick) {
+        step(&game, INPUT_FIRE, 0);
+        check("cold Minigun retains its full spin-up", game.actors[0].slots[0].ammo == weapons[MINIGUN].ammo);
+    }
+    step(&game, INPUT_FIRE, 0);
+    check("spun-up Minigun fires", game.actors[0].slots[0].ammo == weapons[MINIGUN].ammo - 1);
+    for (int tick = 0; tick < 4; ++tick) step(&game, 0, 0);
+    check("short trigger release retains Minigun rotation", game.actors[0].slots[0].startup_count == 4);
+    for (int tick = 0; tick < 4; ++tick) {
+        step(&game, INPUT_FIRE, 0);
+        check("warm Minigun resumes only after recovering lost rotation", game.actors[0].slots[0].ammo == weapons[MINIGUN].ammo - 1);
+    }
+    step(&game, INPUT_FIRE, 0);
+    check("warm Minigun resumes sooner than cold start", game.actors[0].slots[0].ammo == weapons[MINIGUN].ammo - 2);
+    for (int tick = 0; tick < weapons[MINIGUN].startup_time + 10; ++tick) step(&game, 0, 0);
+    check("Minigun eventually stops fully", game.actors[0].slots[0].startup_count == weapons[MINIGUN].startup_time);
+    for (int tick = 0; tick < weapons[MINIGUN].startup_time; ++tick) step(&game, INPUT_FIRE, 0);
+    check("stopped Minigun requires full spin-up again", game.actors[0].slots[0].ammo == weapons[MINIGUN].ammo - 2);
+    step(&game, INPUT_FIRE, 0);
+    check("stopped Minigun fires after full spin-up", game.actors[0].slots[0].ammo == weapons[MINIGUN].ammo - 3);
+    step(&game, INPUT_FIRE, INPUT_RELOAD);
+    while (game.actors[0].slots[0].phase == WEAPON_RELOADING) step(&game, INPUT_FIRE, 0);
+    check("Minigun reload resets a cold barrel", game.actors[0].slots[0].startup_count == weapons[MINIGUN].startup_time);
+    game_free(&game);
+
     game = shooting_game(COLT);
     Actor *actor = &game.actors[0];
     actor->velocity = v3(2, 3, 4);
@@ -153,11 +236,26 @@ int main(void) {
     game = shooting_game(LAW);
     for (int tick = 0; tick < 60; tick++) step(&game, INPUT_FIRE, 0);
     check("LAW cannot fire standing", game.projectile_count == 0);
-    game.actors[0].pose = CROUCHING;
-    game.actors[0].animation_tick = 14;
-    for (int tick = 0; tick <= weapons[LAW].startup_time; tick++) step(&game, INPUT_FIRE, 0);
-    check("LAW fires after crouched grounded startup", game.projectile_count == 1);
     game_free(&game);
+
+    for (int pose = CROUCHING; pose <= PRONE; ++pose) {
+        game = shooting_game(LAW);
+        game.actors[0].pose = (Pose)pose;
+        game.actors[0].animation = pose == CROUCHING ? MOVE_CROUCH : MOVE_PRONE;
+        game.actors[0].animation_tick = 1;
+        game.actors[0].contact = AIRBORNE;
+        for (int tick = 0; tick <= weapons[LAW].startup_time; ++tick) step(&game, INPUT_FIRE, 0);
+        check("LAW still cannot launch in the air", game.projectile_count == 0 &&
+            game.actors[0].slots[0].startup_count == weapons[LAW].startup_time);
+        game.actors[0].contact = GROUNDED;
+        for (int tick = 0; tick < weapons[LAW].startup_time; ++tick) {
+            step(&game, INPUT_FIRE, 0);
+            check("newly braced LAW retains launcher startup", game.projectile_count == 0);
+        }
+        step(&game, INPUT_FIRE, 0);
+        check("LAW launches without an extra stance-animation wait", game.projectile_count == 1);
+        game_free(&game);
+    }
 
     game = shooting_game(COLT);
     game.actors[0].grenades = 3;

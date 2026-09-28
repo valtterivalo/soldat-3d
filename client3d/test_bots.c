@@ -120,6 +120,30 @@ int main(void) {
     check(retention.bots[0].target==challenger && !(acquisition.held&INPUT_FIRE),
         "target loss reacquires a visible opponent with a fresh reaction interval");
     game_free(&retention);
+    const WeaponId precision_weapons[]={RUGER77,BARRETT};
+    for(size_t gun=0;gun<sizeof(precision_weapons)/sizeof(*precision_weapons);++gun) {
+        unsigned hits=0;
+        for(unsigned seed=1;seed<=24;++seed) {
+            Game game=encounter(precision_weapons[gun],COLT,360,600,2);
+            game.actors[0].spawn_id=seed;game.random=seed*0x9e3779b9u;
+            game.actors[0].slots[0].fire_count=0;
+            unsigned shots=0,hit=0;
+            for(int tick=0;tick<180 && !hit;++tick) {
+                Input inputs[ACTOR_COUNT]={0};inputs[0]=bot_input(&game,0);
+                if(shots){inputs[0].held&=~INPUT_FIRE;inputs[0].pressed&=~INPUT_FIRE;}
+                game_step(&game,inputs);
+                for(size_t event=0;event<game.event_count;++event) {
+                    const GameEvent *e=&game.events[event];
+                    if(e->actor!=0 || e->weapon!=precision_weapons[gun])continue;
+                    shots+=e->kind==EVENT_SHOT;
+                    hit|=e->kind==EVENT_HIT && e->target==1;
+                }
+            }
+            check(shots==1,"ready precision bots commit a shot instead of waiting for guaranteed torso alignment");
+            hits+=hit;game_free(&game);
+        }
+        check(hits>=6 && hits<=18,"long-range first shots remain useful without near-perfect precision");
+    }
     const WeaponId primaries[]={AK74,M249,BARRETT,AK74,AK74,AK74,AK74};
     const WeaponId secondaries[]={COLT,COLT,COLT,LAW,COLT,COLT,COLT};
     for(int scenario=0;scenario<7;++scenario) {

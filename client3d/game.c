@@ -29,7 +29,7 @@ static WeaponState weapon_ready(WeaponId id) {
     const WeaponDef *def = &weapons[id];
     return (WeaponState){
         .id = id, .ammo = id == M79 ? 0 : def->ammo,
-        .fire_count = def->fire_interval, .reload_count = def->reload_time,
+        .fire_count = id == BARRETT ? 0 : def->fire_interval, .reload_count = def->reload_time,
         .startup_count = def->startup_time, .phase = WEAPON_READY
     };
 }

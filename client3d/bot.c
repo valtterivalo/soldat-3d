@@ -175,6 +175,7 @@ Input bot_input(Game *game,int index) {
     else if(actor->active_slot==1 && gun->id==COLT && (!seen || actor->slots[0].ammo>0))desired_slot=0;
     if(desired_slot!=actor->active_slot && actor->switch_ticks==0 && memory->grenade_hold==0)input.held|=INPUT_SWITCH;
     const WeaponDef *weapon=&weapons[gun->id];
+    int marksman=gun->id==BARRETT || gun->id==RUGER77;
     Vec3 approach=target<0 ? actor->position : sub(target_point,v3(0,8,0));
     BotMoveIntent intent=BOT_TRAVERSE;
     int objective=game->mode==MODE_CTF || game->mode==MODE_INF || game->mode==MODE_POINTMATCH || game->mode==MODE_HTF;
@@ -213,7 +214,8 @@ Input bot_input(Game *game,int index) {
         approach=memory->cover;intent=BOT_RETREAT;
     }
     if(!seen && gun->phase==WEAPON_READY && gun->ammo<weapon->ammo/2)input.held|=INPUT_RELOAD;
-    Aim solution=target>=0 ? intercept(actor,target_point,memory->target_velocity,weapon->speed,
+    Vec3 lead=scale(memory->target_velocity,marksman ? .8f+.35f*memory->aim_error.z : 1);
+    Aim solution=target>=0 ? intercept(actor,target_point,lead,weapon->speed,
         weapon->inherited_velocity,weapon->timeout) : (Aim){add(approach,v3(0,8,0)),0,0};
     int throwing=memory->grenade_hold>0;
     if(!throwing && seen && memory->reaction_ticks==0 && actor->spawn_protection_ticks<0 &&
@@ -243,7 +245,9 @@ Input bot_input(Game *game,int index) {
         memory->aim_bias=v3(random_unit(memory)*2-1,random_unit(memory)*2-1,random_unit(memory)*2-1);
     }
     memory->aim_error=add(memory->aim_error,scale(sub(memory->aim_bias,memory->aim_error),.08f));
-    float error=throwing ? 0 : fminf(distance*.025f,precision ? .8f+distance*.006f : 1.5f+distance*.014f);
+    float error=marksman ? fminf(distance*.04f,3+distance*.032f) :
+        fminf(distance*.025f,precision ? .8f+distance*.006f : 1.5f+distance*.014f);
+    if(throwing)error=0;
     Vec3 desired=actor_aim_direction(actor,add(solution.target,scale(memory->aim_error,error)));
     float yaw=atan2f(desired.x,desired.z),pitch=asinf(desired.y);
     if(throwing) {

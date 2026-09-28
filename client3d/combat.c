@@ -342,13 +342,9 @@ static void explode(Game *game, Projectile projectile, WeaponId damage_weapon, f
     }
 }
 
-static void fire_weapon(Game *game, int index, Input input) {
-    Actor *actor = &game->actors[index];
-    WeaponState *state = &actor->slots[actor->active_slot];
+WeaponSpread combat_spread(const Actor *actor, uint32_t held) {
+    const WeaponState *state = &actor->slots[actor->active_slot];
     const WeaponDef *weapon = &weapons[state->id];
-    Vec3 forward = direction(actor->yaw, actor->pitch);
-    Vec3 right = direction(actor->yaw - 1.57079632679f, 0);
-    Vec3 origin = actor_muzzle(actor);
     float spread = 0;
     if (state->id != EAGLE && state->id != SPAS12) {
         spread = weapon->bullet_spread;
@@ -356,7 +352,7 @@ static void fire_weapon(Game *game, int index, Input input) {
         else if (actor->pose == CROUCHING) spread /= 1.3f;
     }
     float moveacc = 0;
-    if (((input.held & INPUT_JETS) && actor->fuel > 0) || actor->animation == MOVE_RUN ||
+    if (((held & INPUT_JETS) && actor->fuel > 0) || actor->animation == MOVE_RUN ||
         actor->animation == MOVE_JUMP || actor->animation == MOVE_SIDEJUMP ||
         actor->animation == MOVE_ROLL || actor->animation == MOVE_ROLLBACK)
         moveacc = weapon->movement_acc * 7;
@@ -366,6 +362,20 @@ static void fire_weapon(Game *game, int index, Input input) {
     float inaccuracy = fminf(SRC_MAX_INACCURACY,
                             0.25f * (actor->bink_count * 0.01f + moveacc + spread));
     float deviation = SRC_MAX_INACCURACY * sinf(inaccuracy / SRC_MAX_INACCURACY * 1.57079632679f);
+    float pellet_angle = state->id == SPAS12 ? atanf(weapon->bullet_spread / weapon->speed) :
+        state->id == EAGLE ? asinf(sqrtf(3) * weapon->bullet_spread / weapon->speed) : 0;
+    return (WeaponSpread){deviation, pellet_angle, atan2f(deviation, 1 - deviation) + pellet_angle};
+}
+
+static void fire_weapon(Game *game, int index, Input input) {
+    Actor *actor = &game->actors[index];
+    WeaponState *state = &actor->slots[actor->active_slot];
+    const WeaponDef *weapon = &weapons[state->id];
+    Vec3 forward = direction(actor->yaw, actor->pitch);
+    Vec3 right = direction(actor->yaw - 1.57079632679f, 0);
+    Vec3 origin = actor_muzzle(actor);
+    WeaponSpread spread = combat_spread(actor, input.held);
+    float deviation = spread.aim_deviation;
     float axial = 1 + (game_random(game) * 2 - 1) * deviation;
     float radial = (game_random(game) * 2 - 1) * deviation;
     float azimuth = game_random(game) * 6.28318530718f;
@@ -375,11 +385,25 @@ static void fire_weapon(Game *game, int index, Input input) {
     Vec3 aim = add(scale(forward, axial), scale(tangent, radial));
     Vec3 velocity = add(scale(aim, weapon->speed / length(aim)),
                         scale(actor->velocity, weapon->inherited_velocity));
+    Vec3 pellet_right = right, pellet_up = up;
+    if (state->id == SPAS12) {
+        aim = scale(aim, 1 / length(aim));
+        pellet_right = sub(right, scale(aim, dot(right, aim)));
+        pellet_right = scale(pellet_right, 1 / length(pellet_right));
+        pellet_up = v3(pellet_right.y * aim.z - pellet_right.z * aim.y,
+            pellet_right.z * aim.x - pellet_right.x * aim.z, pellet_right.x * aim.y - pellet_right.y * aim.x);
+    }
     int pellets = state->id == SPAS12 ? 6 : state->id == EAGLE ? 2 : 1;
     for (int i = 0; i < pellets; i++) {
         Vec3 pellet = velocity;
         Vec3 muzzle = origin;
-        if (pellets > 1)
+        if (state->id == SPAS12) {
+            float radius = tanf(spread.pellet_angle) * sqrtf(game_random(game));
+            float angle = game_random(game) * 6.28318530718f;
+            Vec3 offset = add(scale(pellet_right, radius * cosf(angle)), scale(pellet_up, radius * sinf(angle)));
+            pellet = add(scale(add(aim, offset), weapon->speed / sqrtf(1 + radius * radius)),
+                scale(actor->velocity, weapon->inherited_velocity));
+        } else if (state->id == EAGLE)
             pellet = add(pellet, v3((game_random(game) * 2 - 1) * weapon->bullet_spread,
                                    (game_random(game) * 2 - 1) * weapon->bullet_spread,
                                    (game_random(game) * 2 - 1) * weapon->bullet_spread));
@@ -476,15 +500,15 @@ static void actor_controls(Game *game, int i, Input input) {
         if (++actor->melee_frame >= SRC_PUNCH_FRAMES) actor->melee_frame = 0;
     }
     if (!(input.held & INPUT_FIRE)) {
-        state->startup_count = weapon->startup_time;
+        if (state->id == MINIGUN && state->startup_count < weapon->startup_time) ++state->startup_count;
+        else state->startup_count = weapon->startup_time;
         actor->burst_count = 0;
     }
     if (!melee && (input.held & INPUT_FIRE) && state->ammo > 0 && state->fire_count == 0 &&
         (!rolling || state->id == CHAINSAW) && actor->switch_ticks == 0 && actor->throw_frame == 0 &&
         (weapon->fire_mode != 2 || actor->burst_count == 0) &&
         (state->id != LAW || (actor->contact == GROUNDED &&
-            ((actor->pose == CROUCHING && (actor->animation_tick > 13 || input.right != 0 || input.forward != 0)) ||
-             (actor->pose == PRONE && actor->animation == MOVE_PRONE && actor->animation_tick > 23))))) {
+            (actor->pose == CROUCHING || actor->pose == PRONE)))) {
         if (state->startup_count > 0) state->startup_count--;
         else fire_weapon(game, i, input);
     }

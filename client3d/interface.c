@@ -29,7 +29,6 @@ Interface interface_load(void) {
     char *config = LoadFileText(SOLDAT_ASSET_DIR "/mod.ini");
     if (!config) abort();
     interface.asset_scale = read_scale(config, "DefaultScale");
-    interface.cursor_scale = read_scale(config, "interface-gfx/cursor.png");
     interface.title_scale = read_scale(config, "interface-gfx/title-l.png");
     UnloadFileText(config);
     interface.font = LoadFontEx(SOLDAT_ASSET_DIR "/interface-gfx/play-regular.ttf", 48, NULL, 0);
@@ -37,7 +36,7 @@ Interface interface_load(void) {
     SetTextureFilter(interface.font.texture, TEXTURE_FILTER_BILINEAR);
     const char *files[UI_TEXTURE_COUNT] = {
         "health", "ammo", "jet", "health-bar", "reload-bar", "jet-bar",
-        "fire-bar", "fire-bar-r", "nade", "cursor", "menucursor", "back", "title-l", "title-r", "vest-bar", "cluster-nade", "flag", "noflag"
+        "fire-bar", "fire-bar-r", "nade", "menucursor", "back", "title-l", "title-r", "vest-bar", "cluster-nade", "flag", "noflag"
     };
     for (int i = 0; i < UI_TEXTURE_COUNT; ++i) interface.textures[i] = texture(files[i]);
     const char *guns[14] = {
@@ -163,11 +162,15 @@ void interface_hud(const Interface *interface, const Game *game, HitFeedback hit
     if (player->life == ALIVE) {
         if (player->spawn_protection_ticks>0)
             text(interface,TextFormat("%d",player->spawn_protection_ticks/TICK_RATE+1),w/2,h/2-32*s,16*s,.5f,WHITE);
-        float bloom = 1 + powf((float)player->bink_count, .6f) / 20;
-        Texture2D cursor = interface->textures[UI_CURSOR];
-        float cross_scale = s / interface->cursor_scale * bloom;
-        sprite(cursor, (w - cursor.width * cross_scale) / 2, (h - cursor.height * cross_scale) / 2,
-            cross_scale, WHITE);
+        WeaponSpread spread = combat_spread(player, player->controls);
+        float radius = fmaxf(3 * s, h * .5f * tanf(spread.max_angle) / tanf(camera.fovy * DEG2RAD * .5f));
+        const Vector2 directions[] = {{1,0},{-1,0},{0,1},{0,-1}};
+        for (size_t i = 0; i < sizeof(directions) / sizeof(*directions); ++i) {
+            Vector2 from = {w * .5f + directions[i].x * radius, h * .5f + directions[i].y * radius};
+            Vector2 to = {from.x + directions[i].x * 2.5f * s, from.y + directions[i].y * 2.5f * s};
+            DrawLineEx(from, to, 1.5f * s, (Color){0,0,0,70});
+            DrawLineEx(from, to, .7f * s, (Color){240,245,240,170});
+        }
         if (hit.kind != HIT_NONE && hit.age < .15f) {
             float progress = hit.age / .15f;
             float fade = 1 - progress * progress;

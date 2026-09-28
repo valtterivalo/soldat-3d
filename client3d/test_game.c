@@ -62,6 +62,28 @@ int main(void) {
     world_init();
     poses_init();
     ragdolls_init();
+    Game sniper;
+    game_init(&sniper, 0x736e6970u, MODE_DEATHMATCH);
+    for (int i=1;i<ACTOR_COUNT;++i) sniper.actors[i].life=INACTIVE;
+    Actor *shooter=&sniper.actors[0];
+    game_select_loadout(shooter,BARRETT,COLT);
+    for (int spawn=0;spawn<2;++spawn) {
+        check(shooter->slots[0].ammo==weapons[BARRETT].ammo && shooter->slots[0].fire_count==0 &&
+            shooter->slots[0].startup_count==0,"spawned Barrett is loaded and ready",sniper.tick,0);
+        shooter->position=shooter->previous=v3(0,10000,0);
+        Input fire[ACTOR_COUNT]={0};
+        fire[0].held=INPUT_FIRE;
+        while (shooter->spawn_protection_ticks>0) {
+            game_step(&sniper,fire);
+            check(shooter->slots[0].ammo==weapons[BARRETT].ammo,
+                "spawn protection still prevents protected firing",sniper.tick,0);
+        }
+        game_step(&sniper,fire);
+        check(shooter->slots[0].ammo==weapons[BARRETT].ammo-1,
+            "Barrett fires on the first unprotected tick without a loading delay",sniper.tick,0);
+        if (spawn==0) check(game_respawn(&sniper,0)==SPAWN_READY,"sniper respawns",sniper.tick,0);
+    }
+    game_free(&sniper);
     Game falling;
     game_init(&falling, 0x66616c6cu, MODE_DEATHMATCH);
     Actor *corpse = &falling.actors[0];
