@@ -1,0 +1,14 @@
+**
+!Dockerfile
+!LICENSE.md
+!client3d/
+!client3d/**
+!shared/
+!shared/Weapons.pas
+!shared/Constants.pas
+!shared/Anims.pas
+!shared/Cvar.pas
+!shared/mechanics/
+!shared/mechanics/Sprites.pas
+!shared/mechanics/Things.pas
+**/.DS_Store

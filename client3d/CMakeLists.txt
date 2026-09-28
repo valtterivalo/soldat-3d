@@ -1,0 +1,74 @@
+cmake_minimum_required(VERSION 3.25)
+project(soldat3d LANGUAGES C)
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+set(CMAKE_C_EXTENSIONS OFF)
+
+option(SOLDAT3D_RENDERER "Build the playable native client" ON)
+find_path(ZSTD_INCLUDE_DIR zstd.h REQUIRED)
+find_library(ZSTD_LIBRARY zstd REQUIRED)
+include(CTest)
+include(weapons.cmake)
+soldat_generate_weapons("${CMAKE_CURRENT_BINARY_DIR}/generated")
+
+add_library(soldat_sim STATIC game.c bot.c bot_navigation.c showcase.c movement.c combat.c camera.c world.c world_layouts.c world_layouts_dm.c world_layouts_team.c pose.c ragdoll.c pickups.c objectives.c snapshot.c network.c lobby.c
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/weapons_generated.c")
+target_include_directories(soldat_sim PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/generated")
+target_include_directories(soldat_sim PRIVATE "${ZSTD_INCLUDE_DIR}")
+target_link_libraries(soldat_sim PUBLIC "${ZSTD_LIBRARY}")
+target_compile_definitions(soldat_sim PRIVATE SOLDAT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+target_compile_options(soldat_sim PRIVATE -Wall -Wextra -Wpedantic -Werror)
+if(NOT WIN32)
+    target_link_libraries(soldat_sim PUBLIC m)
+endif()
+
+if(BUILD_TESTING)
+    foreach(suite IN ITEMS movement combat camera pose world broadphase navigation bots bot_navigation game spawns ragdoll pickups snapshot network objectives lobby materials)
+        add_executable(test_${suite} test_${suite}.c)
+        target_link_libraries(test_${suite} PRIVATE soldat_sim)
+        target_compile_options(test_${suite} PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        add_test(NAME ${suite} COMMAND test_${suite})
+    endforeach()
+endif()
+
+add_executable(soldat3d-server server.c)
+target_link_libraries(soldat3d-server PRIVATE soldat_sim)
+target_compile_options(soldat3d-server PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(bench_sim bench_sim.c)
+target_link_libraries(bench_sim PRIVATE soldat_sim)
+target_compile_options(bench_sim PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(bench_bots bench_bots.c)
+target_link_libraries(bench_bots PRIVATE soldat_sim)
+target_compile_options(bench_bots PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+add_executable(soldat3d-matchmaker matchmaker.c)
+target_link_libraries(soldat3d-matchmaker PRIVATE soldat_sim)
+target_compile_options(soldat3d-matchmaker PRIVATE -Wall -Wextra -Wpedantic -Werror)
+
+if(SOLDAT3D_RENDERER)
+    include(FetchContent)
+    set(BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(raylib
+        URL https://github.com/raysan5/raylib/archive/refs/tags/6.0.tar.gz
+        URL_HASH SHA256=2b3ee1e2120c7a0796b33062c7e9a694dd8a8caa56a96319ac8c8ecf54a90d0b)
+    FetchContent_MakeAvailable(raylib)
+    add_executable(soldat3d main.c gostek.c interface.c map_visuals.c effects.c)
+    target_link_libraries(soldat3d PRIVATE soldat_sim raylib glfw)
+    target_compile_options(soldat3d PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_definitions(soldat3d PRIVATE SOLDAT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+    add_executable(soldat3d-film film.c gostek.c map_visuals.c effects.c)
+    target_link_libraries(soldat3d-film PRIVATE soldat_sim raylib glfw)
+    target_compile_options(soldat3d-film PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_compile_definitions(soldat3d-film PRIVATE SOLDAT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
+    add_executable(soldat3d-film-score film_score.c)
+    target_compile_options(soldat3d-film-score PRIVATE -Wall -Wextra -Wpedantic -Werror)
+    target_link_libraries(soldat3d-film-score PRIVATE m)
+    if(APPLE)
+        add_custom_command(TARGET soldat3d POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_CURRENT_BINARY_DIR}/Soldat3D.app/Contents/MacOS"
+            COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:soldat3d>" "${CMAKE_CURRENT_BINARY_DIR}/Soldat3D.app/Contents/MacOS/soldat3d"
+            COMMAND ${CMAKE_COMMAND} -E copy "${CMAKE_CURRENT_SOURCE_DIR}/Info.plist" "${CMAKE_CURRENT_BINARY_DIR}/Soldat3D.app/Contents/Info.plist")
+    endif()
+endif()

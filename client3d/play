@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+source_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cmake -S "$source_dir" -B "$source_dir/../build/3d" -DCMAKE_BUILD_TYPE=Release
+cmake --build "$source_dir/../build/3d" --parallel
+exec "$source_dir/../build/3d/soldat3d" "$@"

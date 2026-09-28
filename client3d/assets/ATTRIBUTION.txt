@@ -1,0 +1,18 @@
+Original maps, sounds, animation data, objects and artwork are unchanged
+OpenSoldat v0.2 assets from https://github.com/opensoldat/base/releases/tag/v0.2
+Copyright OpenSoldat contributors.
+Soldat and all the file formats the program produces are Copyright
+2001-2018 Michal Marcinkowski. All rights reserved.
+Licensed under CC BY 4.0, see LICENSE.txt and
+https://creativecommons.org/licenses/by/4.0/
+Source soldat.smod SHA-1: bf87492d10563319839cec7dc414976deffeba25
+
+All 99 maps have newly authored 3D layouts using original palettes, materials,
+scenery, spawn roles and jet capacity. Source artwork is mapped onto solid meshes.
+
+Play Regular in interface-gfx/ is by Jonas Hecksher, Playtypes, e-types AS.
+Licensed under the SIL Open Font License 1.1, see interface-gfx/PLAY-OFL.txt.
+
+generated/soldier-turnaround.png is an AI-generated adaptation of the original
+Soldat character artwork. Generated with the built-in image generation tool.
+The generation prompt is recorded in generated/prompts.txt.

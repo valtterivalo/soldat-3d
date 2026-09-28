@@ -1,185 +1,28 @@
+name: Soldat 3D
 on: [push, pull_request, workflow_dispatch]
-name: soldat
+permissions:
+  contents: read
 jobs:
-  linux-build-smoke:
-    runs-on: ubuntu-latest
+  linux:
+    runs-on: ubuntu-24.04
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install cmake git fpc libprotobuf-dev protobuf-compiler libssl-dev libsdl2-dev libopenal-dev libphysfs-dev libfreetype6
-
-      - name: Compile soldat
+          sudo apt-get install -y build-essential cmake pkg-config libzstd-dev libgl1-mesa-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxext-dev libwayland-dev libxkbcommon-dev
+      - name: Test simulation
         run: |
-          export BUILD_ID=${GITHUB_SHA::8}
-          mkdir build
-          cd build
-          cmake .. -DCMAKE_INSTALL_PREFIX=./soldat -DCMAKE_BUILD_TYPE=Release
-          make
-          make install
-          cmake .. -DBUILD_CLIENT=0 -DCMAKE_INSTALL_PREFIX=./soldatserver -DCMAKE_BUILD_TYPE=Release
-          make install
-
-  appimage:
-    runs-on: ubuntu-18.04
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-        with:
-          fetch-depth: 0 # Otherwise `git describe --tags` doesn't work
-
-      - name: Install dependencies
+          cmake -S client3d -B build/tests -DSOLDAT3D_RENDERER=OFF -DCMAKE_BUILD_TYPE=Debug -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all"
+          cmake --build build/tests --parallel
+          ctest --test-dir build/tests --output-on-failure
+      - name: Build native client
         run: |
-          sudo apt-get update
-          sudo apt-get install cmake git fpc libprotobuf-dev protobuf-compiler libssl-dev libsdl2-dev libopenal-dev libphysfs-dev libfreetype6
-
-      - name: Compile soldat
+          cmake -S client3d -B build/client -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+          cmake --build build/client --parallel --target soldat3d
+      - name: Test server image
         run: |
-          export BUILD_ID=${GITHUB_SHA::8}
-          mkdir build
-          cd build
-          cmake .. -DCMAKE_INSTALL_PREFIX=./soldat/AppDir -DCMAKE_BUILD_TYPE=Release
-          make
-          make install
-          make clean
-          cmake .. -DBUILD_CLIENT=0 -DCMAKE_INSTALL_PREFIX=./soldatserver/AppDir -DCMAKE_BUILD_TYPE=Release
-          make install
-
-      - name: Build AppImages
-        run: |
-          ./.github/workflows/make-appimage.sh build/soldat client
-          ./.github/workflows/make-appimage.sh build/soldatserver server
-
-      - name: Upload client AppImage
-        uses: actions/upload-artifact@v2
-        with:
-          name: appimages
-          path: build/soldat/*.AppImage
-
-      - name: Upload server AppImage
-        uses: actions/upload-artifact@v2
-        with:
-          name: appimages
-          path: build/soldatserver/*.AppImage
-
-  windows:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-
-      - name: Cache fpc
-        id: fpc
-        uses: actions/cache@v2
-        with:
-          path: C:\fpc
-          key: freepascal
-
-      - name: Cache vcpkg
-        id: vcpkg-cache
-        uses: actions/cache@v2
-        with:
-          path: C:\vcpkg\installed
-          key: vcpkg-cache
-
-      - name: Download freepascal
-        if: steps.fpc.outputs.cache-hit != 'true'
-        run: |
-          curl -o C:\fpc32.exe ftp://mirror.freemirror.org/pub/fpc/dist/3.0.4/i386-win32/fpc-3.0.4.i386-win32.exe
-          curl -o C:\fpc64.exe ftp://mirror.freemirror.org/pub/fpc/dist/3.0.4/i386-win32/fpc-3.0.4.i386-win32.cross.x86_64-win64.exe
-
-      - name: Install freepascal
-        if: steps.fpc.outputs.cache-hit != 'true'
-        run: |
-           C:\fpc32.exe /silent /nocancel /suppressmsgboxes=no
-           C:\fpc64.exe /silent /nocancel /suppressmsgboxes=no
-        shell: cmd
-
-      - name: Install dependencies
-        run: |
-          vcpkg.exe --triplet x64-windows install sdl2 physfs openssl protobuf freetype openal-soft
-
-      - name: Build soldat
-        run: |
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
-          set PATH=%PATH%;C:\fpc\3.0.4\bin\i386-win32
-          set OPENSSL_ROOT_DIR=C:\vcpkg\installed\x64-windows
-          set PHYSFSDIR=C:\vcpkg\installed\x64-windows
-          set BUILD_ID=%GITHUB_SHA:~0,8%
-          mkdir build
-          cd build
-          cmake -G "NMake Makefiles" -DCMAKE_INSTALL_PREFIX=.\soldat -DCROSS_WINDOWS_64=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE="C:\vcpkg\scripts\buildsystems\vcpkg.cmake"  -DSDL2_BUILDING_LIBRARY=1 ..
-          nmake
-          nmake install
-        shell: cmd
-
-      - uses: actions/upload-artifact@v2
-        with:
-          name: windows-build
-          path: build/soldat/
-
-  macos:
-    runs-on: macos-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-        with:
-          submodules: true
-
-      - name: Install dependencies
-        run: |
-          brew install openssl@1.1 protobuf fpc cmake sdl2 physfs freetype2
-
-      - name: Compile soldat
-        run: |
-          export BUILD_ID=${GITHUB_SHA::8}
-          mkdir build
-          cd build
-          export PKG_CONFIG_PATH=$PKG_CONFIG_PATH:/usr/local/opt/openssl@1.1/lib/pkgconfig
-          cmake -DCMAKE_INSTALL_PREFIX=./soldat -DOPENSSL_ROOT_DIR=$(brew --prefix openssl@1.1) ..
-          make
-          make install
-
-      - uses: actions/upload-artifact@v2
-        with:
-          name: macos-build
-          path: build/soldat
-
-  continuous:
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/develop'
-    needs: [appimage, windows, macos]
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v2
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v3
-
-      - name: Zip build dirs back together
-        run: |
-          zip -r windows-build.zip windows-build
-          zip -r macos-build.zip macos-build
-
-      - name: Chmod and zip AppImages
-        run: |
-          cd appimages
-          chmod u+x *.AppImage
-          zip linux-appimage.zip Soldat-*.AppImage
-          zip linux-server-only-appimage.zip SoldatServer-*.AppImage
-          mv linux-appimage.zip linux-server-only-appimage.zip ..
-
-      - name: Upload release
-        uses: softprops/action-gh-release@fe9a9bd3295828558c7a3c004f23f3bf77d155b2
-        with:
-          tag_name: continuous
-          files: |
-            windows-build.zip
-            macos-build.zip
-            linux-appimage.zip
-            linux-server-only-appimage.zip
-          body: Soldat 1.8 alpha dev build
-          name: Soldat 1.8 alpha dev build
+          docker build -t soldat-3d .
+          docker run --rm soldat-3d --map ctf_Ash --mode ctf --bots 6 --ticks 120

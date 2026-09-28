@@ -45,3 +45,6 @@ Release
 *.swo
 *.swp
 *.swu
+
+release-media/
+.DS_Store
