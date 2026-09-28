@@ -843,7 +843,9 @@ static void layout_navigation(const Layout *layout)
     for(size_t i=0;i<count;++i)component[i]=i;
     for(size_t i=0;i<world_nav_link_count;++i) {
         NavLink edge=world_nav_links[i];size_t a=(size_t)edge.from,b=(size_t)edge.to;
-        while(component[a]!=a)a=component[a];while(component[b]!=b)b=component[b];component[a]=b;
+        while(component[a]!=a)a=component[a];
+        while(component[b]!=b)b=component[b];
+        component[a]=b;
     }
     for(size_t i=0;i<count;++i){size_t root=i;while(component[root]!=root)root=component[root];component[i]=root;}
     size_t root=component[0];
