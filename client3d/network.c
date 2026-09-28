@@ -1,6 +1,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include "network.h"
 #include "snapshot.h"
+#include "replica.h"
 #include "world.h"
 #include "generated_rules.h"
 #include "objectives.h"
@@ -19,9 +20,10 @@
 #include <time.h>
 #include <unistd.h>
 
-enum { MAGIC = 0x534f4c33, VERSION = NETWORK_PROTOCOL_VERSION, DATAGRAM = 1200, HEADER = 48, BUTTONS = 11, COMMAND_SIZE = 104, INTERPOLATION_TICKS = 2, REPAIR_GROUP = 255, EVENT_SIZE = 64 };
+enum { MAGIC = 0x534f4c33, VERSION = NETWORK_PROTOCOL_VERSION, DATAGRAM = 1200, HEADER = NETWORK_PACKET_HEADER, BUTTONS = 11, COMMAND_SIZE = 104, INTERPOLATION_TICKS = 2, REPAIR_GROUP = 255, EVENT_SIZE = 64 };
 typedef enum { HELLO = 1, WELCOME, COMMAND, STATE, LEAVE, REJECT, REPAIR, INPUT_ACK, EVENTS, EVENT_ACK, CHALLENGE, CONNECT } PacketKind;
 typedef enum { HOST, CLIENT } Role;
+typedef enum { DELIVERY_UNMEASURED, DELIVERY_CLEAN, DELIVERY_LOSS } Delivery;
 typedef struct {
     uint64_t sequence, view_frame, view_start_frame;
     Input input;
@@ -33,6 +35,8 @@ typedef struct {
 typedef struct {
     struct sockaddr_in6 address;
     uint64_t token, received_sequence, applied_sequence, confirmed_frame, joined_frame, event_ack;
+    uint64_t delivery_sequence, receipt_sequence, receipt_previous, receipt_mask;
+    Delivery delivery;
     uint32_t presses[BUTTONS];
     Input input;
     PendingInput *commands;
@@ -50,6 +54,7 @@ typedef struct {
 typedef struct {
     unsigned char *data, *fragments, *parity, *parity_received;
     size_t size, count, received;
+    unsigned repairs;
     uint64_t sequence, ack;
     size_t map;
 } Assembly;
@@ -66,6 +71,7 @@ struct Network {
     Admission admissions[ACTOR_COUNT];
     size_t admission_count;
     uint64_t sequence, frame, completed_frame, authority_tick, input_ack;
+    uint64_t received_delivery, delivery_mask;
     uint32_t presses[BUTTONS], spawn_ids[ACTOR_COUNT];
     size_t map;
     char name[PLAYER_NAME_LENGTH + 1], message[128], server_name[64];
@@ -175,11 +181,12 @@ static float getfloat(const unsigned char *p) { uint32_t bits = get32(p); float 
 
 static void send_packet(Network *net, const struct sockaddr_in6 *address, PacketKind kind,
     uint64_t token, uint64_t sequence, uint64_t ack, uint32_t map, uint32_t total,
-    uint32_t offset, const unsigned char *data, size_t size) {
+    uint32_t offset, uint64_t delivery, unsigned repairs, const unsigned char *data, size_t size) {
     unsigned char packet[DATAGRAM];
     put32(packet, MAGIC); put32(packet + 4, VERSION); put32(packet + 8, kind);
     put64(packet + 12, token); put64(packet + 20, sequence); put64(packet + 28, ack);
     put32(packet + 36, map); put32(packet + 40, total); put32(packet + 44, offset);
+    put64(packet + 48, delivery); packet[56] = (unsigned char)repairs;
     if (size) memcpy(packet + HEADER, data, size);
     ssize_t sent = sendto(net->socket, packet, HEADER + size, 0, (const struct sockaddr *)address, sizeof(*address));
     if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)) return;
@@ -265,13 +272,11 @@ int network_receive_at(Network *net, Game *game, double now) {
         }
     }
     if (net->role == CLIENT && net->status == NET_CONNECTING && now - net->last_hello >= 1) {
-        send_packet(net, &net->server.address, HELLO, 0, 0, 0, 0, 0, 0,
+        send_packet(net, &net->server.address, HELLO, 0, 0, 0, 0, 0, 0, 0, 0,
             (unsigned char *)net->name, strlen(net->name) + 1);
         net->last_hello = now;
     }
     int updated = 0;
-    GameEvent *events = NULL;
-    size_t event_count = 0;
     for (;;) {
         unsigned char packet[65536];
         struct sockaddr_in6 address;
@@ -297,6 +302,8 @@ int network_receive_at(Network *net, Game *game, double now) {
         PacketKind kind = get32(packet + 8);
         uint64_t token = get64(packet + 12), sequence = get64(packet + 20), ack = get64(packet + 28);
         uint32_t map = get32(packet + 36), total = get32(packet + 40), offset = get32(packet + 44);
+        uint64_t delivery = get64(packet + 48);
+        unsigned repairs = packet[56];
         size_t size = (size_t)received - HEADER;
         unsigned char *data = packet + HEADER;
         if (net->role == HOST) {
@@ -324,7 +331,7 @@ int network_receive_at(Network *net, Game *game, double now) {
                         if (close(random) != 0) fail("close /dev/urandom");
                         net->admissions[admission] = (Admission){address, challenge, now};
                     }
-                    send_packet(net, &address, CHALLENGE, net->admissions[admission].token, 0, 0, 0, 0, 0, NULL, 0);
+                    send_packet(net, &address, CHALLENGE, net->admissions[admission].token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
                     continue;
                 }
                 if (slot < 0 || token != net->peers[slot].token) {
@@ -340,7 +347,7 @@ int network_receive_at(Network *net, Game *game, double now) {
                             if (i != net->local_actor && !net->peers[i].joined) { slot = i; break; }
                     if (slot < 0) {
                         const unsigned char full[] = "Server is full";
-                        send_packet(net, &address, REJECT, 0, 0, 0, 0, 0, 0, full, sizeof(full));
+                        send_packet(net, &address, REJECT, 0, 0, 0, 0, 0, 0, 0, 0, full, sizeof(full));
                         continue;
                     }
                     free(net->peers[slot].commands);
@@ -354,7 +361,7 @@ int network_receive_at(Network *net, Game *game, double now) {
                 }
                 unsigned char assigned[12]; put32(assigned, (uint32_t)slot); put64(assigned + 4, net->next_event_id);
                 send_packet(net, &address, WELCOME, net->peers[slot].token, 0, 0,
-                    (uint32_t)world_map_current, 0, 0, assigned, sizeof(assigned));
+                    (uint32_t)world_map_current, 0, 0, 0, 0, assigned, sizeof(assigned));
                 continue;
             }
             if (slot < 0 || token != net->peers[slot].token) continue;
@@ -371,6 +378,19 @@ int network_receive_at(Network *net, Game *game, double now) {
                 peer->joined = 0; game->actors[slot].life = INACTIVE; game->actors[slot].respawn_ticks = 0; continue;
             }
             if (kind != COMMAND || size < 5 || get32(data + 1) > DATAGRAM - HEADER || map != world_map_current) continue;
+            if (sequence && sequence <= peer->delivery_sequence && sequence >= peer->receipt_sequence) {
+                if (sequence > peer->receipt_sequence) {
+                    uint64_t distance = sequence - peer->receipt_sequence;
+                    peer->receipt_previous = peer->receipt_sequence;
+                    peer->receipt_sequence = sequence;
+                    peer->receipt_mask = distance < 64 ? peer->receipt_mask << distance : 0;
+                }
+                peer->receipt_mask |= (uint64_t)total << 32 | offset;
+                uint64_t distance = sequence - peer->receipt_previous;
+                uint64_t valid = sequence >= 64 ? UINT64_MAX : (UINT64_C(1) << sequence) - 1;
+                uint64_t settled = distance < 64 ? valid & (UINT64_MAX << distance) : 0;
+                if (settled) peer->delivery = (peer->receipt_mask & settled) == settled ? DELIVERY_CLEAN : DELIVERY_LOSS;
+            }
             Snapshot commands = {0};
             if (!snapshot_unpack(&commands, data, size)) continue;
             if (!commands.size || commands.size % COMMAND_SIZE != 0) { free(commands.data); continue; }
@@ -417,7 +437,7 @@ int network_receive_at(Network *net, Game *game, double now) {
         } else {
             if (!same_address(&address, &net->server.address)) continue;
             if (kind == CHALLENGE && net->status == NET_CONNECTING && size == 0) {
-                send_packet(net, &net->server.address, CONNECT, token, 0, 0, 0, 0, 0,
+                send_packet(net, &net->server.address, CONNECT, token, 0, 0, 0, 0, 0, 0, 0,
                     (unsigned char *)net->name, strlen(net->name) + 1);
                 continue;
             }
@@ -433,6 +453,15 @@ int network_receive_at(Network *net, Game *game, double now) {
             }
             if (net->status != NET_CONNECTED || token != net->server.token) continue;
             net->server.last_seen = now;
+            if ((kind == STATE || kind == REPAIR) && delivery) {
+                if (delivery > net->received_delivery) {
+                    uint64_t distance = delivery - net->received_delivery;
+                    net->delivery_mask = distance < 64 ? net->delivery_mask << distance : 0;
+                    net->received_delivery = delivery;
+                }
+                uint64_t distance = net->received_delivery - delivery;
+                if (distance < 64) net->delivery_mask |= UINT64_C(1) << distance;
+            }
             if (kind == LEAVE) { net->status = NET_DISCONNECTED; strcpy(net->message, "Host disconnected"); continue; }
             if (kind == INPUT_ACK) {
                 if (ack >= net->input_ack) { net->input_ack = ack; net->input_ack_events = sequence; }
@@ -490,28 +519,28 @@ int network_receive_at(Network *net, Game *game, double now) {
                 net->journal_count -= consumed;
                 if (consumed) memmove(net->journal, net->journal + consumed, net->journal_count * sizeof(*net->journal));
                 send_packet(net, &net->server.address, EVENT_ACK, net->server.token, net->received_event_id, net->completed_frame,
-                    (uint32_t)net->map, 0, 0, NULL, 0);
+                    (uint32_t)net->map, 0, 0, 0, 0, NULL, 0);
                 continue;
             }
-            if ((kind != STATE && kind != REPAIR) || map >= world_map_count || sequence <= net->completed_frame || !total) continue;
+            if ((kind != STATE && kind != REPAIR) || map >= world_map_count || sequence <= net->completed_frame || !total || repairs > 2) continue;
             size_t fragments = ((size_t)total + DATAGRAM - HEADER - 1) / (DATAGRAM - HEADER);
             size_t groups = (fragments + REPAIR_GROUP - 1) / REPAIR_GROUP;
             if (kind == STATE && (offset >= total || size > total - offset || offset % (DATAGRAM - HEADER) != 0 ||
                 size != (total - offset < DATAGRAM - HEADER ? total - offset : DATAGRAM - HEADER))) continue;
             size_t group_bytes = kind == REPAIR && offset / 2 < groups ? total - (size_t)(offset / 2) * REPAIR_GROUP * (DATAGRAM - HEADER) : 0;
-            if (kind == REPAIR && (offset >= groups * 2 || size != (group_bytes < DATAGRAM - HEADER ? group_bytes : DATAGRAM - HEADER))) continue;
+            if (kind == REPAIR && (offset >= groups * 2 || offset % 2 >= repairs || size != (group_bytes < DATAGRAM - HEADER ? group_bytes : DATAGRAM - HEADER))) continue;
             Assembly *assembly = &net->assemblies[sequence % (SRC_MAX_OLDPOS + 1)];
             if (sequence < assembly->sequence) continue;
             if (sequence != assembly->sequence) {
                 free(assembly->data); free(assembly->fragments); free(assembly->parity); free(assembly->parity_received);
                 *assembly = (Assembly){.data = malloc(total), .size = total, .sequence = sequence, .ack = ack, .map = map,
-                    .count = ((size_t)total + DATAGRAM - HEADER - 1) / (DATAGRAM - HEADER)};
+                    .count = ((size_t)total + DATAGRAM - HEADER - 1) / (DATAGRAM - HEADER), .repairs = repairs};
                 assembly->fragments = calloc(assembly->count, 1);
                 assembly->parity = calloc(groups * 2, DATAGRAM - HEADER);
                 assembly->parity_received = calloc(groups, 1);
                 if (!assembly->data || !assembly->fragments || !assembly->parity || !assembly->parity_received) abort();
             }
-            if (total != assembly->size || ack != assembly->ack || map != assembly->map) continue;
+            if (total != assembly->size || ack != assembly->ack || map != assembly->map || repairs != assembly->repairs) continue;
             size_t group;
             if (kind == STATE) {
                 size_t fragment = offset / (DATAGRAM - HEADER);
@@ -530,14 +559,14 @@ int network_receive_at(Network *net, Game *game, double now) {
             const StateFrame *base = baseline ? &net->states[baseline % (SRC_MAX_OLDPOS + 1)] : NULL;
             if (base && base->sequence != baseline) continue;
             Snapshot unpacked = {0};
-            int decoded = base ? snapshot_delta_unpack(&unpacked, &base->raw, assembly->data + 16, assembly->size - 16) :
+            int decoded = base ? replica_delta_unpack(&unpacked, &base->raw, assembly->data + 16, assembly->size - 16) :
                 snapshot_unpack(&unpacked, assembly->data + 16, assembly->size - 16);
             if (!decoded) {
                 net->status = NET_REJECTED; strcpy(net->message, "Host sent invalid packed state"); continue;
             }
             Actor previous = game->actors[net->local_actor];
             uint64_t previous_tick = game->tick;
-            if (!snapshot_decode(game, unpacked.data, unpacked.size)) {
+            if (!replica_decode(game, unpacked.data, unpacked.size)) {
                 free(unpacked.data);
                 net->status = NET_REJECTED; strcpy(net->message, "Host sent invalid state"); continue;
             }
@@ -550,26 +579,12 @@ int network_receive_at(Network *net, Game *game, double now) {
             const StateFrame *last_state = &net->states[net->completed_frame % (SRC_MAX_OLDPOS + 1)];
             uint64_t gap = last_state->sequence && game->tick >= last_state->game.tick ? game->tick - last_state->game.tick : 0;
             StateFrame *state = &net->states[sequence % (SRC_MAX_OLDPOS + 1)];
-            if (!snapshot_decode(&state->game, unpacked.data, unpacked.size)) abort();
+            if (!replica_decode(&state->game, unpacked.data, unpacked.size)) abort();
             free(state->raw.data); state->raw = unpacked;
             state->sequence = sequence; state->gap = gap; state->receipt = now; state->map = map;
             net->completed_frame = sequence;
             net->map = map;
             net->map_first_event = get64(assembly->data + 8);
-            for (size_t event = 0; event < game->event_count; ++event) {
-                GameEvent current = game->events[event];
-                int predicted = 0;
-                if (current.actor == net->local_actor && (current.kind == EVENT_SHOT || current.kind == EVENT_DROP))
-                    for (size_t i = 0; i < net->predicted_event_count; ++i) {
-                        const PredictedEvent *saved = &net->predicted_events[i];
-                        if (saved->sequence == game->actors[net->local_actor].shot_sequence &&
-                            saved->weapon == current.weapon && saved->kind == current.kind) predicted = 1;
-                    }
-                if (predicted) continue;
-                events = realloc(events, (event_count + 1) * sizeof(*events));
-                if (!events) abort();
-                events[event_count++] = current;
-            }
             size_t acknowledged = 0;
             while (acknowledged < net->pending_count && net->pending[acknowledged].sequence <= ack) ++acknowledged;
             net->pending_count -= acknowledged;
@@ -612,11 +627,7 @@ int network_receive_at(Network *net, Game *game, double now) {
             if (net->predicted_events[i].sequence > net->input_ack) net->predicted_events[remaining++] = net->predicted_events[i];
         net->predicted_event_count = remaining;
     }
-    if (updated) {
-        free(game->events);
-        game->events = events;
-        game->event_count = game->event_capacity = event_count;
-    }
+    if (updated) game->event_count = 0;
     if (net->role == HOST) {
         for (int i = 0; i < ACTOR_COUNT; ++i) {
             Peer *peer = &net->peers[i];
@@ -698,7 +709,7 @@ void network_broadcast(Network *net, const Game *game) {
             .epoch = net->map_first_event, .map = world_map_current, .event = event};
         net->source_event_id = source_id;
     }
-    Snapshot raw = snapshot_encode(game);
+    Snapshot raw = replica_encode(game);
     Snapshot keyframe = snapshot_pack(&raw);
     ++net->frame;
     SentFrame *frame = &net->sent[net->frame % (SRC_MAX_OLDPOS + 1)];
@@ -711,7 +722,7 @@ void network_broadcast(Network *net, const Game *game) {
         Peer *peer = &net->peers[i];
         if (!peer->joined) continue;
         send_packet(net, &peer->address, INPUT_ACK, peer->token, net->next_event_id, peer->applied_sequence,
-            (uint32_t)world_map_current, 0, 0, NULL, 0);
+            (uint32_t)world_map_current, 0, 0, 0, 0, NULL, 0);
         size_t cached = 0;
         while (cached < prepared && payloads[cached].requested != peer->confirmed_frame) ++cached;
         if (cached == prepared) {
@@ -719,7 +730,7 @@ void network_broadcast(Network *net, const Game *game) {
             Snapshot delta = {0}, selected = keyframe;
             uint64_t baseline = 0;
             if (peer->confirmed_frame && base->sequence == peer->confirmed_frame && base->map == world_map_current) {
-                delta = snapshot_delta_pack(&raw, &base->raw);
+                delta = replica_delta_pack(&raw, &base->raw);
                 if (delta.size < keyframe.size) { baseline = base->sequence; selected = delta; }
             }
             size_t total = selected.size + 16;
@@ -728,16 +739,23 @@ void network_broadcast(Network *net, const Game *game) {
             size_t groups = (fragments + REPAIR_GROUP - 1) / REPAIR_GROUP;
             Payload *payload = &payloads[prepared++];
             *payload = (Payload){.requested = peer->confirmed_frame, .total = total, .fragments = fragments, .groups = groups,
-                .data = malloc(total), .parity = calloc(groups * 2, DATAGRAM - HEADER)};
-            if (!payload->data || !payload->parity) abort();
+                .data = malloc(total)};
+            if (!payload->data) abort();
             put64(payload->data, baseline);
             put64(payload->data + 8, net->map_first_event);
             memcpy(payload->data + 16, selected.data, selected.size);
-            for (size_t fragment = 0; fragment < fragments; ++fragment) {
+            free(delta.data);
+        }
+        Payload *payload = &payloads[cached];
+        unsigned repairs = peer->delivery == DELIVERY_CLEAN ? 0 : 2;
+        if (repairs && !payload->parity) {
+            payload->parity = calloc(payload->groups * 2, DATAGRAM - HEADER);
+            if (!payload->parity) abort();
+            for (size_t fragment = 0; fragment < payload->fragments; ++fragment) {
                 size_t group = fragment / REPAIR_GROUP;
                 unsigned char *p = payload->parity + group * 2 * (DATAGRAM - HEADER);
                 unsigned char *q = p + DATAGRAM - HEADER;
-                size_t offset = fragment * (DATAGRAM - HEADER), size = total - offset;
+                size_t offset = fragment * (DATAGRAM - HEADER), size = payload->total - offset;
                 if (size > DATAGRAM - HEADER) size = DATAGRAM - HEADER;
                 unsigned char coefficient = (unsigned char)(fragment % REPAIR_GROUP + 1);
                 for (size_t byte = 0; byte < size; ++byte) {
@@ -745,23 +763,23 @@ void network_broadcast(Network *net, const Game *game) {
                     q[byte] ^= field[coefficient][payload->data[offset + byte]];
                 }
             }
-            free(delta.data);
         }
-        const Payload *payload = &payloads[cached];
         net->stats.raw_snapshot_bytes += raw.size;
         net->stats.packed_snapshot_bytes += payload->total;
         for (size_t offset = 0; offset < payload->total; offset += DATAGRAM - HEADER) {
             size_t size = payload->total - offset;
             if (size > DATAGRAM - HEADER) size = DATAGRAM - HEADER;
             send_packet(net, &peer->address, STATE, peer->token, net->frame, peer->applied_sequence,
-                (uint32_t)world_map_current, (uint32_t)payload->total, (uint32_t)offset, payload->data + offset, size);
+                (uint32_t)world_map_current, (uint32_t)payload->total, (uint32_t)offset,
+                ++peer->delivery_sequence, repairs, payload->data + offset, size);
         }
         for (size_t group = 0; group < payload->groups; ++group) {
             size_t size = payload->total - group * REPAIR_GROUP * (DATAGRAM - HEADER);
             if (size > DATAGRAM - HEADER) size = DATAGRAM - HEADER;
-            for (unsigned repair = 0; repair < 2; ++repair)
+            for (unsigned repair = 0; repair < repairs; ++repair)
                 send_packet(net, &peer->address, REPAIR, peer->token, net->frame, peer->applied_sequence,
                     (uint32_t)world_map_current, (uint32_t)payload->total, (uint32_t)(group * 2 + repair),
+                    ++peer->delivery_sequence, repairs,
                     payload->parity + (group * 2 + repair) * (DATAGRAM - HEADER), size);
         }
         size_t event = 0;
@@ -780,7 +798,7 @@ void network_broadcast(Network *net, const Game *game) {
             }
             Snapshot event_bytes = {bytes, size}, packed = snapshot_pack(&event_bytes);
             send_packet(net, &peer->address, EVENTS, peer->token, net->journal[event - 1].id, 0,
-                (uint32_t)world_map_current, 0, 0, packed.data, packed.size);
+                (uint32_t)world_map_current, 0, 0, 0, 0, packed.data, packed.size);
             free(packed.data);
         }
     }
@@ -825,8 +843,8 @@ void network_send_input(Network *net, Game *game, Input input, WeaponId primary,
         }
         Snapshot raw = {data, size};
         Snapshot packed = snapshot_pack(&raw);
-        send_packet(net, &net->server.address, COMMAND, net->server.token, net->sequence, net->completed_frame,
-            (uint32_t)net->map, 0, 0, packed.data, packed.size);
+        send_packet(net, &net->server.address, COMMAND, net->server.token, net->received_delivery, net->completed_frame,
+            (uint32_t)net->map, (uint32_t)(net->delivery_mask >> 32), (uint32_t)net->delivery_mask, 0, 0, packed.data, packed.size);
         free(packed.data);
     }
     game->event_count = 0;
@@ -851,11 +869,11 @@ void network_send_input(Network *net, Game *game, Input input, WeaponId primary,
 
 void network_close(Network *net) {
     if (net->role == CLIENT && net->status == NET_CONNECTED)
-        send_packet(net, &net->server.address, LEAVE, net->server.token, 0, 0, 0, 0, 0, NULL, 0);
+        send_packet(net, &net->server.address, LEAVE, net->server.token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
     if (net->role == HOST)
         for (int i = 0; i < ACTOR_COUNT; ++i)
             if (net->peers[i].joined)
-                send_packet(net, &net->peers[i].address, LEAVE, net->peers[i].token, 0, 0, 0, 0, 0, NULL, 0);
+                send_packet(net, &net->peers[i].address, LEAVE, net->peers[i].token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
     if (close(net->socket) != 0) fail("close socket");
     for (int i = 0; i < ACTOR_COUNT; ++i) free(net->peers[i].commands);
     for (int i = 0; i <= SRC_MAX_OLDPOS; ++i) {
@@ -898,11 +916,14 @@ const Game *network_render(Network *net, const Game *predicted, double now, floa
     const StateFrame *latest = &net->states[net->completed_frame % (SRC_MAX_OLDPOS + 1)];
     double elapsed = net->render_time ? now - net->render_time : 0;
     uint64_t delay = INTERPOLATION_TICKS;
+    double target = (double)latest->game.tick + (now - latest->receipt) * TICK_RATE;
     for (int i = 0; i <= SRC_MAX_OLDPOS; ++i) {
         const StateFrame *state = &net->states[i];
-        if (state->sequence && state->sequence + SRC_MAX_OLDPOS >= net->completed_frame && state->gap > delay) delay = state->gap;
+        if (!state->sequence || state->sequence + SRC_MAX_OLDPOS < net->completed_frame || state->map != net->map) continue;
+        target = fmin(target, (double)state->game.tick + (now - state->receipt) * TICK_RATE);
+        if (state->gap > delay) delay = state->gap;
     }
-    double target = (double)latest->game.tick + (now - latest->receipt) * TICK_RATE - (double)delay;
+    target -= (double)delay;
     if (!net->render_time) net->view_tick = fmax(0, target);
     else {
         double error = target - net->view_tick;

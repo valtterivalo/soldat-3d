@@ -1,6 +1,7 @@
 #include "game.h"
 #include "network.h"
 #include "snapshot.h"
+#include "replica.h"
 #include "pose.h"
 #include "ragdoll.h"
 #include "pickups.h"
@@ -50,7 +51,7 @@ static Datagram receive_datagram(Network *receiver) {
             continue;
         }
         check(size>=0,"fixture receives complete UDP datagram");
-        if (size >= 48 && bytes[11] == 8) continue;
+        if (size >= NETWORK_PACKET_HEADER && bytes[11] == 8) continue;
         Datagram packet={.size=(size_t)size,.bytes=malloc((size_t)size)};
         check(packet.bytes!=NULL,"allocate datagram fixture");memcpy(packet.bytes,bytes,(size_t)size);
         return packet;
@@ -176,6 +177,7 @@ static void latency_contract(int population) {
     double started = network_time(), previous_view = 0;
     float previous_x = 0, maximum_step = 0;
     int rendered = 0, stalled = 0;
+    double maximum_lag = 0, total_lag = 0;
     for (int tick = 0; tick < 600; ++tick) {
         Input input = {.forward = tick < 500 ? 1 : 0, .yaw = .3f};
         network_send_input(peer, &client, input, AK74, COLT);
@@ -194,6 +196,10 @@ static void latency_contract(int population) {
             double view = network_view_tick(peer);
             check(view >= previous_view, "jitter and reordering never reverse the remote render clock");
             if (tick > 120 && view == previous_view) ++stalled;
+            if (tick > 120) {
+                maximum_lag = fmax(maximum_lag, (double)host.tick - view);
+                total_lag += (double)host.tick - view;
+            }
             check(fabs(render->actors[0].position.x - (float)view * .4f) < .001f,
                 "interpolated remote actor matches its exact rendered view timestamp");
             if (rendered) maximum_step = fmaxf(maximum_step, fabsf(render->actors[0].position.x - previous_x));
@@ -220,18 +226,20 @@ static void latency_contract(int population) {
     deliver_relay(&downlink, drain_tick, peer, &client, started + (double)drain_tick / TICK_RATE);
     while (client.tick < host.tick)
         check(receive_state(peer, &client), "final confirmation reconciles the delayed client");
-    Snapshot authority = snapshot_encode(&host), replica = snapshot_encode(&client);
+    Snapshot authority = replica_encode(&host), replica = replica_encode(&client);
     if (authority.size != replica.size || memcmp(authority.data, replica.data, authority.size)) {
         size_t first = 0; while (first < authority.size && first < replica.size && authority.data[first] == replica.data[first]) ++first;
         fprintf(stderr,"DIFF pop=%d sizes=%zu/%zu first=%zu tick=%llu/%llu eventid=%llu/%llu count=%zu/%zu localpos=%.2f/%.2f motion=%llu/%llu received=%llu\n", population,authority.size,replica.size,first,(unsigned long long)host.tick,(unsigned long long)client.tick,(unsigned long long)host.next_event_id,(unsigned long long)client.next_event_id,host.event_count,client.event_count,host.actors[local].position.z,client.actors[local].position.z,(unsigned long long)host.actors[local].motion_tick,(unsigned long long)client.actors[local].motion_tick,(unsigned long long)network_received_sequence(server,local));
     }
     check(authority.size == replica.size && !memcmp(authority.data, replica.data, authority.size),
-        "200ms RTT with loss and reordering converges to exact authoritative state");
+        "200ms RTT with loss and reordering converges to exact replicated state");
     check(maximum_step <= .112f, "240Hz remote presentation never jumps across late snapshots");
     NetworkStats up = network_stats(peer), down = network_stats(server);
-    printf("Latency %d actors: 200ms RTT, loss %.1f%%/%.1f%%, 240Hz max remote step %.4f, correction mean %.4f max %.4f, traffic %.1f/%.1f KiB/s up/down, snapshots %llu/600, datagrams %.2f/update, repaired %llu, stalledframes %d/1916\n",
+    printf("Latency %d actors: 200ms RTT, loss %.1f%%/%.1f%%, 240Hz max remote step %.4f, correction mean %.4f max %.4f, traffic %.1f/%.1f KiB/s up/down, snapshots %llu/600, datagrams %.2f/update, repaired %llu, stalledframes %d/1916, viewlag mean %.3f max %.3f ticks\n",
         population, 100.0 * uplink.lost / uplink.captured, 100.0 * downlink.lost / downlink.captured, maximum_step,
-        up.correction_distance / up.snapshots, up.max_correction, up.sent_bytes / 10240.0, down.sent_bytes / 10240.0, (unsigned long long)up.snapshots, down.sent_packets / 602.0, (unsigned long long)up.repaired_fragments, stalled);
+        up.correction_distance / up.snapshots, up.max_correction, up.sent_bytes / 10240.0, down.sent_bytes / 10240.0, (unsigned long long)up.snapshots, down.sent_packets / 602.0, (unsigned long long)up.repaired_fragments, stalled, total_lag / 1916, maximum_lag);
+    check(stalled <= (population == 8 ? 1 : 0) && maximum_lag <= SRC_MAX_OLDPOS,
+        "impaired remote presentation keeps moving within the authoritative hit-history window");
     free(authority.data); free(replica.data); free(uplink.packets); free(downlink.packets);
     network_close(peer); network_close(server);
     check(close(front) == 0 && close(back) == 0, "close both relay sockets");
@@ -327,6 +335,70 @@ static void prediction_contract(void) {
     game_free(&host); game_free(&client);
 }
 
+static unsigned relay_delivery_frame(Network *server, Network *peer, Game *replica, int lose_data) {
+    Datagram first = receive_datagram(peer);
+    check(first.bytes[11] == 4, "delivery fixture captures a state datagram");
+    uint32_t total;
+    memcpy(&total, first.bytes + 40, 4); total = ntohl(total);
+    size_t fragments = (total + NETWORK_PACKET_DATA - 1) / NETWORK_PACKET_DATA;
+    check(fragments == 1, "compact two-player state fits one datagram");
+    unsigned repairs = first.bytes[56];
+    size_t count = 1 + repairs;
+    Datagram packets[3]; packets[0] = first;
+    for (size_t i = 1; i < count; ++i) packets[i] = receive_datagram(peer);
+    uint64_t expected = network_stats(peer).received_packets + count - (unsigned)lose_data;
+    for (size_t i = count; i > (unsigned)lose_data; --i) send_datagram(server, peer, packets[i - 1]);
+    while (network_stats(peer).received_packets < expected) network_receive(peer, replica);
+    for (size_t i = 0; i < count; ++i) free(packets[i].bytes);
+    return repairs;
+}
+
+static void delivery_contract(void) {
+    world_load(world_map_index("Arena2"));
+    Game host, replica;
+    game_init(&host, 731, MODE_DEATHMATCH); game_init(&replica, 849, MODE_DEATHMATCH);
+    for (int i = 1; i < ACTOR_COUNT; ++i) host.actors[i].life = INACTIVE;
+    host.score_limit = host.time_limit_ticks = 0;
+    Network *server = network_host(0, 0, &host);
+    Network *peer = network_join("127.0.0.1", network_port(server), "Delivery");
+    connect_client(server, peer, &host, &replica);
+    int local = network_actor(peer);
+    host.actors[0].position = host.actors[0].previous = v3(0, 10000, 100);
+    host.actors[local].position = host.actors[local].previous = v3(0, 10000, 0);
+    network_broadcast(server, &host);
+    check(relay_delivery_frame(server, peer, &replica, 1) == 2 && network_stats(peer).snapshots == 1,
+        "startup repairs recover a lost state before delivery quality is known");
+    enum { CLEAN_WARMUP, LOSS_STREAM, CLEAN_RECOVERY, COMPLETE } phase = CLEAN_WARMUP;
+    unsigned loss_frames = 0, protected_losses = 0;
+    uint64_t sequence = 0;
+    double started = network_time();
+    while (phase != COMPLETE) {
+        network_send_input(peer, &replica, (Input){0}, AK74, COLT);
+        ++sequence;
+        while (network_received_sequence(server, local) < sequence) network_receive(server, &host);
+        Input inputs[ACTOR_COUNT] = {0}; network_inputs(server, inputs); game_step(&host, inputs);
+        network_broadcast(server, &host);
+        int lose = phase == LOSS_STREAM && (loss_frames % 3 == 0 || (loss_frames >= 6 && loss_frames < 9));
+        unsigned repairs = relay_delivery_frame(server, peer, &replica, lose);
+        if (phase == CLEAN_WARMUP && repairs == 0) phase = LOSS_STREAM;
+        else if (phase == LOSS_STREAM) {
+            if (lose && repairs) {
+                ++protected_losses;
+                check(replica.tick == host.tick, "adaptive repair recovers physical loss without waiting for another state");
+            }
+            if (++loss_frames == 12) {
+                check(protected_losses > 0 && repairs > 0,
+                    "physical receipt gaps retain protection even when repair concealed the state loss");
+                phase = CLEAN_RECOVERY;
+            }
+        } else if (phase == CLEAN_RECOVERY && repairs == 0) phase = COMPLETE;
+        check(network_time() - started < (double)SRC_DISCONNECTION_TIME / TICK_RATE,
+            "reordered clean delivery disables redundant repair before the disconnect interval");
+    }
+    check(replica.tick == host.tick, "clean recovery preserves the current authoritative replica");
+    network_close(peer); network_close(server); game_free(&host); game_free(&replica);
+}
+
 static void blocked_spawn_contract(void) {
     world_load(world_map_index("Arena"));
     Game game;
@@ -410,7 +482,7 @@ int main(void) {
         send_datagram(client, server, hello);
         while (!network_stats(server).sent_packets) network_receive(server, &host);
         Datagram challenge = receive_datagram(client);
-        check(challenge.size == 48 && challenge.bytes[11] == 11 && challenge.size <= hello.size,
+        check(challenge.size == NETWORK_PACKET_HEADER && challenge.bytes[11] == 11 && challenge.size <= hello.size,
             "unverified hello receives only a non-amplifying challenge");
         Snapshot after = snapshot_encode(&host);
         check(before.size == after.size && !memcmp(before.data, after.data, before.size),
@@ -438,7 +510,7 @@ int main(void) {
         while (network_stats(server).sent_packets == sent.sent_packets) network_receive(server, &host);
         Datagram lost_welcome = receive_datagram(client);
         check(lost_welcome.bytes[11] == 2, "verified endpoint receives welcome");
-        uint32_t slot_bits; memcpy(&slot_bits, lost_welcome.bytes + 48, 4);
+        uint32_t slot_bits; memcpy(&slot_bits, lost_welcome.bytes + NETWORK_PACKET_HEADER, 4);
         int slot = (int)ntohl(slot_bits);
         uint32_t spawn = host.actors[slot].spawn_id;
         check(network_remote(server, slot), "verified endpoint owns an authoritative player slot");
@@ -453,16 +525,16 @@ int main(void) {
         network_send_input(client, &replica, (Input){.yaw = .4f}, AK74, COLT);
         Datagram command = receive_datagram(server);
         Snapshot raw = {0};
-        check(command.bytes[11] == 3 && snapshot_unpack(&raw, command.bytes + 48, command.size - 48) && raw.size == 104,
+        check(command.bytes[11] == 3 && snapshot_unpack(&raw, command.bytes + NETWORK_PACKET_HEADER, command.size - NETWORK_PACKET_HEADER) && raw.size == 104,
             "fixture intercepts one real encoded player command");
         uint32_t valid_yaw; memcpy(&valid_yaw, raw.data + 24, 4);
         const uint32_t invalid_yaw[] = {0x7fc00000u, 0x7f800000u, 0xff800000u};
         for (size_t i = 0; i < sizeof(invalid_yaw) / sizeof(invalid_yaw[0]); ++i) {
             uint32_t bits = htonl(invalid_yaw[i]); memcpy(raw.data + 24, &bits, 4);
             Snapshot packed = snapshot_pack(&raw);
-            command.size = 48 + packed.size;
+            command.size = NETWORK_PACKET_HEADER + packed.size;
             command.bytes = realloc(command.bytes, command.size); check(command.bytes != NULL, "encode malformed input fixture");
-            memcpy(command.bytes + 48, packed.data, packed.size); free(packed.data);
+            memcpy(command.bytes + NETWORK_PACKET_HEADER, packed.data, packed.size); free(packed.data);
             received = network_stats(server).received_packets;
             send_datagram(client, server, command);
             while (network_stats(server).received_packets == received) network_receive(server, &host);
@@ -472,9 +544,9 @@ int main(void) {
         }
         memcpy(raw.data + 24, &valid_yaw, 4);
         Snapshot packed = snapshot_pack(&raw);
-        command.size = 48 + packed.size;
+        command.size = NETWORK_PACKET_HEADER + packed.size;
         command.bytes = realloc(command.bytes, command.size); check(command.bytes != NULL, "restore valid command fixture");
-        memcpy(command.bytes + 48, packed.data, packed.size);
+        memcpy(command.bytes + NETWORK_PACKET_HEADER, packed.data, packed.size);
         send_datagram(client, server, command);
         while (!network_received_sequence(server, slot)) network_receive(server, &host);
         Input inputs[ACTOR_COUNT] = {0}; network_inputs(server, inputs);
@@ -530,7 +602,7 @@ int main(void) {
         game_step(&host, inputs);
         network_broadcast(server, &host);
         check(receive_state(a, &left) && receive_state(b, &right), "state stream advances every server tick");
-        Snapshot authority = snapshot_encode(&host), replica = snapshot_encode(&left);
+        Snapshot authority = replica_encode(&host), replica = replica_encode(&left);
         check(authority.size == replica.size && !memcmp(authority.data, replica.data, authority.size), "client reconciles to authoritative combat and movement");
         free(authority.data); free(replica.data);
     }
@@ -580,13 +652,13 @@ int main(void) {
     check(!(recovered[alice].pressed&INPUT_GRENADE),"reordered old command does not repeat the recovered tap");
     free(lost_input.bytes);
     game_step(&host,recovered);
-    Snapshot loss_state=snapshot_encode(&host);
+    Snapshot loss_state=replica_encode(&host);
     network_broadcast(server,&host);
     Datagram first_loss=receive_datagram(a);
     uint32_t loss_bytes=(uint32_t)first_loss.bytes[40]<<24|(uint32_t)first_loss.bytes[41]<<16|
         (uint32_t)first_loss.bytes[42]<<8|first_loss.bytes[43];
-    size_t loss_fragments=(loss_bytes+1151)/1152;
-    size_t loss_count=loss_fragments+2*((loss_fragments+254)/255);
+    size_t loss_fragments=(loss_bytes+NETWORK_PACKET_DATA-1)/NETWORK_PACKET_DATA;
+    size_t loss_count=loss_fragments+first_loss.bytes[56]*((loss_fragments+254)/255);
     Datagram *loss=malloc(loss_count*sizeof(*loss));check(loss!=NULL,"allocate loss fixture");
     loss[0]=first_loss;
     for (size_t i=1;i<loss_count;++i) loss[i]=receive_datagram(a);
@@ -594,21 +666,21 @@ int main(void) {
     for (size_t i=1;i<loss_fragments;++i) send_datagram(server,a,loss[i]);
     check(!network_receive(a,&left) && left.tick==replica_tick,"partial snapshot never changes authoritative state");
     game_step(&host,recovered);
-    Snapshot complete_state=snapshot_encode(&host);
+    Snapshot complete_state=replica_encode(&host);
     network_broadcast(server,&host);
     Datagram first_complete=receive_datagram(a);
     uint32_t complete_bytes=(uint32_t)first_complete.bytes[40]<<24|(uint32_t)first_complete.bytes[41]<<16|
         (uint32_t)first_complete.bytes[42]<<8|first_complete.bytes[43];
-    size_t complete_fragments=(complete_bytes+1151)/1152;
-    size_t complete_count=complete_fragments+2*((complete_fragments+254)/255);
+    size_t complete_fragments=(complete_bytes+NETWORK_PACKET_DATA-1)/NETWORK_PACKET_DATA;
+    size_t complete_count=complete_fragments+first_complete.bytes[56]*((complete_fragments+254)/255);
     Datagram *complete=malloc(complete_count*sizeof(*complete));check(complete!=NULL,"allocate reorder fixture");
     complete[0]=first_complete;
     for (size_t i=1;i<complete_count;++i) complete[i]=receive_datagram(a);
     send_datagram(server,a,complete[complete_count-1]);
     for (size_t i=complete_count;i>0;--i) send_datagram(server,a,complete[i-1]);
     check(receive_state(a,&left),"next complete snapshot recovers after loss and reverse-order duplicate fragments");
-    Snapshot recovered_state=snapshot_encode(&left);
-    check(complete_state.size==recovered_state.size && !memcmp(complete_state.data,recovered_state.data,complete_state.size),"loss recovery produces the exact server state");
+    Snapshot recovered_state=replica_encode(&left);
+    check(complete_state.size==recovered_state.size && !memcmp(complete_state.data,recovered_state.data,complete_state.size),"loss recovery produces the exact replicated state");
     send_datagram(server,a,loss[0]);network_receive(a,&left);
     check(left.tick==host.tick,"late fragment from old snapshot cannot roll back state");
     complete[0].bytes[7]=(unsigned char)(NETWORK_PROTOCOL_VERSION-1);
@@ -642,7 +714,7 @@ int main(void) {
     check(receive_state(a,&left),"map transition delivers objective state");
     check(network_map(a)==world_map_current && left.mode==MODE_CTF && left.team_score[TEAM_ALPHA]==1 &&
         left.actors[alice].captures==1 && left.actors[bob].team==TEAM_BRAVO,"map, teams, capture and score replicate together");
-    Snapshot objective_authority=snapshot_encode(&host),objective_replica=snapshot_encode(&left);
+    Snapshot objective_authority=replica_encode(&host),objective_replica=replica_encode(&left);
     check(objective_authority.size==objective_replica.size && !memcmp(objective_authority.data,objective_replica.data,objective_authority.size),"full objective snapshot matches authority");
     free(objective_authority.data);free(objective_replica.data);
     network_select_team(a,TEAM_SPECTATOR);
@@ -689,7 +761,10 @@ int main(void) {
     game_free(&host); game_free(&left); game_free(&right);
     blocked_spawn_contract();
     prediction_contract();
+    delivery_contract();
     latency_contract(2);
+    latency_contract(8);
+    latency_contract(16);
     latency_contract(32);
     ragdolls_free(); poses_free(); world_free();
     puts("Network: portable snapshots, atomic rejection, IPv4/IPv6, two-client combat, fragmentation, UDP loss/reordering, reconciliation, taps, loadouts, CTF lifecycle, disconnect and 32-player capacity passed");
