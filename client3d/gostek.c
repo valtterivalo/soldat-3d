@@ -529,10 +529,10 @@ void gostek_draw(const Actor *actor,int id,uint64_t tick,float alpha,int jetting
     static const Ring belt[]={{0,1,1},{1,1,1}};
     SurfaceArt shirt={body_side[0],{176,210,160,196},{1169,210,155,196},shirt_color,shirt_color};
     SurfaceArt trouser={body_side[3],{168,515,54,113},{1153,515,52,113},pants,WHITE};
-    SurfaceArt sleeve={body_side[5],{0},{0},shirt_color,shirt_color};
-    SurfaceArt flesh={body_side[7],{0},{0},skin,WHITE};
+    SurfaceArt sleeve={.side=body_side[5],.color=shirt_color,.atlas_color=shirt_color};
+    SurfaceArt flesh={.side=body_side[7],.color=skin,.atlas_color=WHITE};
     SurfaceArt boot={body_side[jetting && actor->fuel>0?9:8],{110,650,99,95},{1090,650,95,95},WHITE,WHITE};
-    SurfaceArt dark={body_side[1],{0},{0},{47,49,47,255},WHITE};
+    SurfaceArt dark={.side=body_side[1],.color={47,49,47,255},.atlas_color=WHITE};
     instance_count=0;
     float opacity=actor->spawn_protection_ticks>=0 ? fabsf(100+70*sinf((float)tick*SRC_ILUMINATESPEED))/255:1;
     if (actor->life==ALIVE && actor->bonus==BONUS_PREDATOR) opacity=5.0f/255;
@@ -553,7 +553,7 @@ void gostek_draw(const Actor *actor,int id,uint64_t tick,float alpha,int jetting
         Vector3 toe=Vector3Add(Vector3Add(ankle,Vector3Scale(foot_forward,1.05f)),Vector3Scale(foot_up,-.55f));
         if (actor->life==ALIVE) toe.y=fmaxf(origin.y+.3f,toe.y);
         loft(Vector3Add(toe,Vector3Scale(foot_up,-.4f)),Vector3Add(ankle,Vector3Scale(foot_up,1.7f)),right,1.3f,1.95f,shin,4,boot);
-        SurfaceArt metal={body_side[8],{0},{0},{100,105,103,255},WHITE};
+        SurfaceArt metal={.side=body_side[8],.color={100,105,103,255},.atlas_color=WHITE};
         Vector3 nozzle=Vector3Add(ankle,Vector3Scale(foot_forward,-1.2f));
         loft(Vector3Add(nozzle,Vector3Scale(foot_up,-.5f)),Vector3Add(nozzle,Vector3Scale(foot_up,.7f)),right,.55f,.65f,belt,2,metal);
         Vector3 upper_axis=Vector3Normalize(Vector3Subtract(p[e],p[s]));
@@ -608,7 +608,7 @@ void gostek_draw(const Actor *actor,int id,uint64_t tick,float alpha,int jetting
         if (tick<fire_until[id]) {
             Vec3 muzzle_point=pose_muzzle(&posed,points);
             Vector3 muzzle={muzzle_point.x,muzzle_point.y,muzzle_point.z};
-            SurfaceArt fire={body_side[7],{0},{0},{255,198,67,255},WHITE};
+            SurfaceArt fire={.side=body_side[7],.color={255,198,67,255},.atlas_color=WHITE};
             static const Ring flash[]={{0,.4f,.4f},{.3f,1,1},{1,.01f,.01f}};
             loft(muzzle,Vector3Add(muzzle,Vector3Scale(aim,3.5f)),right,.7f,.7f,flash,3,fire);
         }
