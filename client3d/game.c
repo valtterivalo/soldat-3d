@@ -4,6 +4,7 @@
 #include "ragdoll.h"
 #include "pickups.h"
 #include "objectives.h"
+#include "pose.h"
 
 #include <assert.h>
 #include <stdlib.h>
@@ -56,6 +57,15 @@ void game_select_loadout(Actor *actor, WeaponId primary, WeaponId secondary) {
     }
 }
 
+typedef struct { Vec3 position;float body,enemy;size_t order; } SpawnSite;
+
+static int spawn_order(const void *a,const void *b) {
+    const SpawnSite *left=a,*right=b;
+    if(left->body!=right->body)return left->body>right->body ? -1 : 1;
+    if(left->enemy!=right->enemy)return left->enemy>right->enemy ? -1 : 1;
+    return left->order<right->order ? -1 : left->order>right->order;
+}
+
 SpawnResult game_respawn(Game *game, int index) {
     Actor *actor = &game->actors[index];
     const int kills = actor->kills, deaths = actor->deaths;
@@ -65,11 +75,12 @@ SpawnResult game_respawn(Game *game, int index) {
     const uint32_t spawn_id = actor->spawn_id + 1;
     size_t count = world_team_spawn_count(team);
     assert(team != TEAM_SPECTATOR && count > 0);
-    Vec3 available[count];
+    SpawnSite available[count];
     size_t available_count = 0;
+    float farthest_enemy=0;
     for (size_t candidate = 0; candidate < count; ++candidate) {
         Vec3 position = world_team_spawn(team, candidate);
-        int occupied = 0;
+        int occupied = 0;float body=INFINITY,enemy=INFINITY;
         for (int other = 0; other < ACTOR_COUNT; ++other) {
             if (other == index || game->actors[other].life != ALIVE) continue;
             Vec3 delta = sub(position, game->actors[other].position);
@@ -78,14 +89,53 @@ SpawnResult game_respawn(Game *game, int index) {
                 occupied = 1;
                 break;
             }
+            float distance=dot(delta,delta);body=fminf(body,distance);
+            if(!game_team_mode(game->mode) || game->actors[other].team!=team)enemy=fminf(enemy,distance);
         }
-        if (!occupied) available[available_count++] = position;
+        if (!occupied) {
+            available[available_count++]=(SpawnSite){position,body,enemy,candidate};
+            farthest_enemy=fmaxf(farthest_enemy,enemy);
+        }
     }
     if (!available_count) {
         actor->respawn_ticks = 1;
         return SPAWN_BLOCKED;
     }
-    Vec3 spawn = available[(size_t)(game_random(game) * (float)available_count)];
+    float clearance=SRC_FRAGGRENADE_EXPLOSION_RADIUS+SRC_PART_RADIUS;
+    float required=fminf(farthest_enemy,clearance*clearance);
+    size_t first=(size_t)(game_random(game)*(float)count),eligible=0;
+    for(size_t i=0;i<available_count;++i)if(available[i].enemy>=required) {
+        available[i].order=(available[i].order+count-first)%count;
+        available[eligible++]=available[i];
+    }
+    qsort(available,eligible,sizeof(*available),spawn_order);
+    Vec3 targets[ACTOR_COUNT][3],body[21];
+    for(int other=0;other<ACTOR_COUNT;++other) {
+        const Actor *opponent=&game->actors[other];
+        if(other==index || opponent->life!=ALIVE || (game_team_mode(game->mode) && opponent->team==team))continue;
+        actor_pose(opponent,body);
+        targets[other][0]=body[12];targets[other][1]=scale(add(body[10],body[11]),.5f);targets[other][2]=scale(add(body[5],body[6]),.5f);
+    }
+    Actor standing={.pose=STANDING};actor_pose(&standing,body);
+    Vec3 offsets[]={body[12],scale(add(body[10],body[11]),.5f),scale(add(body[5],body[6]),.5f)};
+    size_t choice=0;
+    for(size_t i=0;i<eligible;++i) {
+        int exposed=0;
+        for(int other=0;other<ACTOR_COUNT && !exposed;++other) {
+            const Actor *opponent=&game->actors[other];
+            if(other==index || opponent->life!=ALIVE || (game_team_mode(game->mode) && opponent->team==team))continue;
+            for(unsigned part=0;part<3;++part) {
+                Vec3 point=add(available[i].position,offsets[part]);
+                if(!world_occluded_for(targets[other][1],point,(WorldQuery){WORLD_TRACE_BULLET,opponent->team,WORLD_NO_FLAG}) ||
+                    !world_occluded_for(add(available[i].position,offsets[1]),targets[other][part],
+                        (WorldQuery){WORLD_TRACE_BULLET,team,WORLD_NO_FLAG})) {
+                    exposed=1;break;
+                }
+            }
+        }
+        if(!exposed){choice=i;break;}
+    }
+    Vec3 spawn=available[choice].position;
     *actor = (Actor){
         .position = spawn, .previous = spawn, .team = team, .captures = captures,
         .spawn_id = spawn_id, .motion_tick = game->tick,

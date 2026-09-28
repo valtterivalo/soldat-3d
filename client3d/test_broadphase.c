@@ -56,7 +56,7 @@ static float random01(uint32_t *state)
 
 int main(void)
 {
-    uint32_t seed=0x129bad9u;size_t compared=0;
+    uint32_t seed=0x129bad9u;size_t compared=0,occlusion_queries=0;
     for(size_t map=0;map<world_map_count;++map) {
         world_load(map);TestHull *hulls=calloc(world_solid_count,sizeof(*hulls));assert(hulls);
         for(size_t i=0;i<world_solid_count;++i) {
@@ -115,9 +115,16 @@ int main(void)
                 fprintf(stderr,"Broadphase mismatch %s case%zu expected hull%d fraction%a actual hull%d fraction%a\n",world_map_names[map],n,expected.box,expected.fraction,actual.box,actual.fraction);
                 abort();
             }
+            if(extents.x==0) {
+                ++occlusion_queries;
+                if(world_occluded_for(a,b,query)!=(expected.box>=0)) {
+                    fprintf(stderr,"Occlusion mismatch %s case%zu expected hull%d\n",world_map_names[map],n,expected.box);
+                    abort();
+                }
+            }
             ++compared;
         }
         free(hulls);
     }
-    world_free();printf("Broadphase: %zu queries on99 maps match exhaustive hull traces\n",compared);return 0;
+    world_free();printf("Broadphase: %zu traces and %zu occlusion queries on99 maps match exhaustive hull traces\n",compared,occlusion_queries);return 0;
 }

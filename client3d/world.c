@@ -321,8 +321,10 @@ static int layout_height(const LayoutTerrain *terrain,float x,float z,float *hei
     *height=sample.y;return 1;
 }
 
+typedef enum { BANK_SLOPE, BANK_SEAL } LayoutBank;
+
 static void layout_bank(size_t *capacity,const LayoutTerrain *terrain,const Vec3 face[3],const Vec3 roof[3],
-    float bottom,const unsigned char stone[4],const unsigned char earth[4])
+    float bottom,const unsigned char stone[4],const unsigned char earth[4],LayoutBank kind)
 {
     float denominator=(face[1].z-face[2].z)*(face[0].x-face[2].x)+(face[2].x-face[1].x)*(face[0].z-face[2].z);
     if(denominator==0)return;
@@ -385,12 +387,41 @@ static void layout_bank(size_t *capacity,const LayoutTerrain *terrain,const Vec3
                 float w=((face[2].z-face[0].z)*(top[k].x-face[2].x)+(face[0].x-face[2].x)*(top[k].z-face[2].z))/denominator;
                 cap[k]=v3(top[k].x,u*roof[0].y+w*roof[1].y+(1-u-w)*roof[2].y,top[k].z);
                 LayoutTerrainVertex sample;
-                if(layout_sample(terrain,top[k].x,top[k].z,&sample)) {top[k].y=sample.y;cap[k].y=sample.crest+20;}
+                if(kind==BANK_SLOPE && layout_sample(terrain,top[k].x,top[k].z,&sample)) {top[k].y=sample.y;cap[k].y=sample.crest+20;}
             }
-            WorldSolid *cliff=solid_append(capacity);solid_polygon(cliff,top,3,bottom-30,stone);cliff->visible_faces=2;
+            WorldSolid *cliff=solid_append(capacity);solid_polygon(cliff,top,3,bottom-30,stone);
+            if(kind==BANK_SLOPE)cliff->visible_faces=2;
             for(unsigned k=0;k<3;++k)memcpy(cliff->color[k],earth,4);
+            if(kind==BANK_SEAL) {
+                for(unsigned k=0;k<3;++k) {
+                    world_bounds.min.x=fminf(world_bounds.min.x,top[k].x);world_bounds.max.x=fmaxf(world_bounds.max.x,top[k].x);
+                    world_bounds.min.z=fminf(world_bounds.min.z,top[k].z);world_bounds.max.z=fmaxf(world_bounds.max.z,top[k].z);
+                }
+                continue;
+            }
             WorldSolid *sky=solid_append(capacity);solid_polygon(sky,cap,3,0,world_background[0]);sky->texture=WORLD_SKY;
             for(unsigned k=0;k<3;++k)sky->vertices[k].y=cap[k].y-20;
+            for(unsigned edge=0;edge<3;++edge) {
+                unsigned next=(edge+1)%3;
+                if(cap[edge].y-20-top[edge].y<=.001f && cap[next].y-20-top[next].y<=.001f)continue;
+                for(unsigned original=0;original<3;++original) {
+                    unsigned end=(original+1)%3,inside=(original+2)%3;
+                    if(fabsf(face[original].y-roof[original].y+20)>.001f || fabsf(face[end].y-roof[end].y+20)>.001f)continue;
+                    Vec3 direction=sub(face[end],face[original]);direction.y=0;
+                    Vec3 outside=v3(direction.z,0,-direction.x);float extent=length(outside);
+                    if(fabsf(dot(outside,sub(top[edge],face[original])))>4*precision*extent ||
+                        fabsf(dot(outside,sub(top[next],face[original])))>4*precision*extent)continue;
+                    if(dot(outside,sub(face[inside],face[original]))>0)outside=scale(outside,-1);
+                    outside=scale(outside,20/extent);
+                    Vec3 ridge[]={v3(top[edge].x,cap[edge].y-20,top[edge].z),v3(top[next].x,cap[next].y-20,top[next].z)};
+                    Vec3 seal[]={ridge[0],ridge[1],add(ridge[1],outside),add(ridge[0],outside)};
+                    for(unsigned side=0;side<2;++side) {
+                        Vec3 closure[]={seal[0],seal[side+1],seal[side+2]};
+                        layout_bank(capacity,terrain,closure,closure,bottom,stone,earth,BANK_SEAL);
+                    }
+                    break;
+                }
+            }
         }
         free(polygon.vertices);
     }
@@ -496,7 +527,7 @@ static void layout_geometry(const SourceMap *source,const Layout *layout)
         for(unsigned triangle=0;triangle<2;++triangle) {
             Vec3 face[]={bank[0],bank[triangle+1],bank[triangle+2]};
             Vec3 cap[]={roof[0],roof[triangle+1],roof[triangle+2]};
-            layout_bank(&capacity,terrain,face,cap,bottom,stone,earth);
+            layout_bank(&capacity,terrain,face,cap,bottom,stone,earth,BANK_SLOPE);
         }
     }
     for(size_t i=0;i<terrain->vertex_count;++i)if(degree[i]) {
@@ -507,7 +538,7 @@ static void layout_geometry(const SourceMap *source,const Layout *layout)
         if(fabsf(a.x*b.z-a.z*b.x)>.01f) {
             Vec3 cap[3];memcpy(cap,face,sizeof(cap));
             for(unsigned v=0;v<3;++v)cap[v].y=vertex.crest+20;
-            layout_bank(&capacity,terrain,face,cap,bottom,stone,earth);
+            layout_bank(&capacity,terrain,face,cap,bottom,stone,earth,BANK_SLOPE);
         }
         for(unsigned corner=0;corner<2;++corner) {
             Vec3 point=corners[i][corner];
@@ -914,9 +945,11 @@ static void layout_player_spawns(const Layout *layout)
     for(unsigned team=TEAM_NONE;team<=TEAM_DELTA;++team) {
         size_t matching=0,capacity=0;
         for(size_t i=0;i<world_source_spawn_count;++i)matching+=world_source_spawns[i].type==team;
-        unsigned char rooms[layout->room_count];memset(rooms,0,sizeof(rooms));
-        for(size_t i=0;i<world_source_spawn_count;++i)
-            if(!matching || world_source_spawns[i].type==team)rooms[spawn_rooms[i]]=1;
+        unsigned char rooms[layout->room_count];
+        memset(rooms,team==TEAM_NONE || !matching,sizeof(rooms));
+        if(team!=TEAM_NONE && matching)
+            for(size_t i=0;i<world_source_spawn_count;++i)
+                if(world_source_spawns[i].type==team)rooms[spawn_rooms[i]]=1;
         WorldQuery query={WORLD_TRACE_ACTOR,team,WORLD_NO_FLAG};
         for(size_t r=0;r<layout->room_count;++r)if(rooms[r]) {
             const LayoutRoom *room=&layout->rooms[r];
@@ -1120,7 +1153,9 @@ int world_nav_link_allows(const NavLink *link,WorldQuery query)
     return 1;
 }
 
-WorldHit world_trace_for(Vec3 start, Vec3 end, Vec3 extents, WorldQuery query)
+typedef enum { TRACE_NEAREST, TRACE_ANY } TraceMode;
+
+static WorldHit world_trace_mode(Vec3 start, Vec3 end, Vec3 extents, WorldQuery query, TraceMode mode)
 {
     WorldHit hit = {1, {0, 0, 0}, -1},interior={0,{0,0,0},-1};
     Vec3 low=v3(fminf(start.x,end.x),fminf(start.y,end.y),fminf(start.z,end.z));
@@ -1172,11 +1207,26 @@ WorldHit world_trace_for(Vec3 start, Vec3 end, Vec3 extents, WorldQuery query)
                 leave = fraction;
             }
         }
-        if(inside && (interior.box<0 || (int)i<interior.box))interior=(WorldHit){0,nearest_normal,(int)i};
-        if(enter>=0 && enter<leave && (enter<hit.fraction || (enter==hit.fraction && (int)i<hit.box)))
+        if(inside && (interior.box<0 || (int)i<interior.box)) {
+            interior=(WorldHit){0,nearest_normal,(int)i};
+            if(mode==TRACE_ANY)return interior;
+        }
+        if(enter>=0 && enter<leave && (enter<hit.fraction || (enter==hit.fraction && (int)i<hit.box))) {
             hit=(WorldHit){enter,normal,(int)i};
+            if(mode==TRACE_ANY)return hit;
+        }
     }
     return interior.box>=0 ? interior : hit;
+}
+
+WorldHit world_trace_for(Vec3 start, Vec3 end, Vec3 extents, WorldQuery query)
+{
+    return world_trace_mode(start,end,extents,query,TRACE_NEAREST);
+}
+
+int world_occluded_for(Vec3 start, Vec3 end, WorldQuery query)
+{
+    return world_trace_mode(start,end,v3(0,0,0),query,TRACE_ANY).box>=0;
 }
 
 WorldHit world_trace(Vec3 start, Vec3 end, Vec3 extents)

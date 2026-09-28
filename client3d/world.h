@@ -55,6 +55,7 @@ Vec3 world_objective_spawn(unsigned type);
 int world_supports_mode(GameMode mode);
 int world_pose_clear_for(Vec3 feet, Pose pose, WorldQuery query);
 WorldHit world_trace_for(Vec3 start, Vec3 end, Vec3 extents, WorldQuery query);
+int world_occluded_for(Vec3 start, Vec3 end, WorldQuery query);
 unsigned world_contact_type(const Actor *actor);
 extern WorldProp *world_props;
 extern size_t world_prop_count, world_scenery_count;

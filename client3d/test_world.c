@@ -79,6 +79,19 @@ int main(void)
         world_load(map);
         assert(world_map_current==map && world_map_index(world_map_names[map])==map);
         assert(world_texture[0] && world_source_spawn_count && world_nav_node_count && world_nav_link_count);
+        if(map==world_map_index("Bunker")) {
+            Actor escape={.position={41.8857f,52.5075f,414.167f},.previous={41.8857f,52.5075f,414.167f},
+                .velocity={-2.33676f,4.40097f,3.33437f},.pose=STANDING,.life=ALIVE,
+                .fuel=world_jet_fuel,.fuel_capacity=world_jet_fuel};
+            assert(world_pose_clear(escape.position,STANDING));
+            Input flight={.forward=1,.yaw=atan2f(-539.477f,769.792f),.held=INPUT_JETS};
+            for(unsigned tick=0;tick<TICK_RATE;++tick) {
+                movement_step(&escape,flight,tick);
+                assert(world_pose_clear(escape.position,STANDING));
+                assert(escape.position.x>=world_bounds.min.x && escape.position.x<=world_bounds.max.x);
+                assert(escape.position.z>=world_bounds.min.z && escape.position.z<=world_bounds.max.z);
+            }
+        }
         for(GameMode mode=MODE_DEATHMATCH;mode<=MODE_HTF;++mode) {
             if(!world_supports_mode(mode))continue;
             Game game;game_init(&game,1234,mode);
@@ -109,7 +122,13 @@ int main(void)
             }
             assert(count>before);
         }
-        Vec3 center=add(world_spawns[0],v3(0,24,0));
+        Vec3 center=v3(0,0,0);
+        size_t site=0;
+        for(;site<world_team_spawn_count(TEAM_NONE);++site) {
+            center=add(world_team_spawn(TEAM_NONE,site),v3(0,24,0));
+            if(world_pose_clear(center,STANDING))break;
+        }
+        assert(site<world_team_spawn_count(TEAM_NONE));
         float span=length(sub(world_bounds.max,world_bounds.min))*2;
         assert(world_pose_clear(center,STANDING));
         const Vec3 directions[]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
