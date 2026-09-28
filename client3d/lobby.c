@@ -153,7 +153,7 @@ LobbyHost *lobby_host_open(int game_socket,const char *directory,unsigned short 
     return host;
 }
 void lobby_host_update(LobbyHost *host,double now) {
-    if (!host->directory_port || (host->advertised && now-host->advertised<expiry()/3)) return;
+    if (!host->directory_port || (host->advertised && now<host->advertised+expiry()/3)) return;
     unsigned char registration[INFO_SIZE]={0};
     memcpy(registration,host->name,strlen(host->name));
     send_message(host->socket,&host->directory,REGISTER,host->token,registration,sizeof(registration));
@@ -192,7 +192,7 @@ size_t lobby_directory_count(const LobbyDirectory *directory) {
 }
 void lobby_directory_pump(LobbyDirectory *directory,double now) {
     for (size_t i=0;i<directory->count;)
-        if (now-directory->entries[i].seen>=expiry()) directory->entries[i]=directory->entries[--directory->count];
+        if (now>=directory->entries[i].seen+expiry()) directory->entries[i]=directory->entries[--directory->count];
         else ++i;
     for (;;) {
         unsigned char packet[65536];struct sockaddr_in6 source;
@@ -262,8 +262,8 @@ void lobby_refresh(Lobby *lobby,double now) {
     send_message(lobby->socket,&lan,QUERY,lobby->lan_request,query_padding,sizeof(query_padding));
 }
 void lobby_pump(Lobby *lobby,double now) {
-    if (lobby->status==LOBBY_LOADING && now-lobby->started>=expiry()) lobby->status=LOBBY_UNREACHABLE;
-    if (lobby->status==LOBBY_LOADING && now-lobby->retried>=expiry()/3) {
+    if (lobby->status==LOBBY_LOADING && now>=lobby->started+expiry()) lobby->status=LOBBY_UNREACHABLE;
+    if (lobby->status==LOBBY_LOADING && now>=lobby->retried+expiry()/3) {
         send_message(lobby->socket,&lobby->directory,LIST,lobby->request,NULL,0);lobby->retried=now;
     }
     for (;;) {
@@ -311,8 +311,8 @@ void lobby_pump(Lobby *lobby,double now) {
     }
     for (size_t i=0;i<lobby->count;) {
         Probe *probe=&lobby->entries[i];
-        if (now-probe->seen>=expiry()) {*probe=lobby->entries[--lobby->count];continue;}
-        if (now-probe->sent>=expiry()/3) {
+        if (now>=probe->seen+expiry()) {*probe=lobby->entries[--lobby->count];continue;}
+        if (now>=probe->sent+expiry()/3) {
             probe->nonce=nonce();probe->sent=now;send_message(lobby->socket,&probe->address,QUERY,probe->nonce,query_padding,sizeof(query_padding));
         }
         ++i;

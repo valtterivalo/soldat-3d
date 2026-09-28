@@ -93,6 +93,8 @@ int main(int argc,char **argv) {
     lobby_refresh(browser,now);
     while (lobby_status(browser)!=LOBBY_READY) {lobby_directory_pump(directory,now);lobby_pump(browser,now);}
     check(lobby_count(browser)==0 && lobby_best(browser)==-1,"empty directory completes and cannot quick join");
+    double expiry_started=network_time();
+    now=nextafter(506.0,INFINITY);
     host=lobby_host_open(network_socket(server),"127.0.0.1",directory_port,"Original rules");
     lobby_host_update(host,now);
     while (!lobby_directory_count(directory)) {lobby_directory_pump(directory,now);network_receive(server,&game);lobby_directory_pump(directory,now);}
@@ -115,11 +117,14 @@ int main(int argc,char **argv) {
         lobby_refresh(browser,heartbeat);
         while (lobby_status(browser)!=LOBBY_READY) {lobby_directory_pump(directory,heartbeat);lobby_pump(browser,heartbeat);}
         if (lobby_count(browser)==1 && lobby_entry(browser,0)->mode==MODE_RAMBO) break;
-        check(network_time()-now<(double)SRC_DISCONNECTION_TIME/TICK_RATE,"verified heartbeat updates directory metadata");
+        check(network_time()-expiry_started<(double)SRC_DISCONNECTION_TIME/TICK_RATE,"verified heartbeat updates directory metadata");
     }
     lobby_directory_pump(directory,now+(double)SRC_DISCONNECTION_TIME/TICK_RATE);
     check(lobby_directory_count(directory)==1,"verified heartbeat extends registration lifetime");
-    lobby_directory_pump(directory,heartbeat+(double)SRC_DISCONNECTION_TIME/TICK_RATE);
+    double deadline=heartbeat+(double)SRC_DISCONNECTION_TIME/TICK_RATE;
+    lobby_directory_pump(directory,nextafter(deadline,-INFINITY));
+    check(lobby_directory_count(directory)==1,"registration remains valid immediately before its deadline");
+    lobby_directory_pump(directory,deadline);
     check(lobby_directory_count(directory)==0,"unresponsive server expires at source disconnect interval");
     lobby_host_close(host);lobby_close(browser);lobby_directory_close(directory);network_close(server);
     if (argc==2) {
