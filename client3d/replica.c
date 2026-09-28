@@ -300,28 +300,34 @@ static uint32_t varint(Codec *c, uint32_t value) {
     return 0;
 }
 
-static void entity(Codec *c, Codec *out, const unsigned char *current, const unsigned char *base, size_t size) {
+static void entity_encode(Codec *c, const unsigned char *current, const unsigned char *base, size_t size) {
     unsigned char mask[(HEADER_BYTES / 4 + 7) / 8] = {0};
     size_t words = size / 4, mask_size = (words + 7) / 8;
     assert(mask_size <= sizeof(mask));
-    if (c->transfer == ENCODE)
-        for (size_t i = 0; i < words; ++i)
-            if (readword(current + i * 4) != (base ? readword(base + i * 4) : 0)) mask[i / 8] |= 1u << (i % 8);
+    for (size_t i = 0; i < words; ++i)
+        if (readword(current + i * 4) != (base ? readword(base + i * 4) : 0)) mask[i / 8] |= 1u << (i % 8);
+    bytes(c, mask, mask_size);
+    for (size_t i = 0; i < words; ++i) {
+        if (!(mask[i / 8] & (1u << (i % 8)))) continue;
+        uint32_t previous = base ? readword(base + i * 4) : 0;
+        uint32_t delta = readword(current + i * 4) - previous;
+        varint(c, (delta << 1) ^ (0u - (delta >> 31)));
+    }
+}
+
+static void entity_decode(Codec *c, Codec *out, const unsigned char *base, size_t size) {
+    unsigned char mask[(HEADER_BYTES / 4 + 7) / 8] = {0};
+    size_t words = size / 4, mask_size = (words + 7) / 8;
+    assert(mask_size <= sizeof(mask));
     bytes(c, mask, mask_size);
     if (words % 8 && (mask[mask_size - 1] >> (words % 8))) c->rejected = 1;
     for (size_t i = 0; i < words && !c->rejected; ++i) {
-        uint32_t previous = base ? readword(base + i * 4) : 0;
-        uint32_t value = previous;
+        uint32_t value = base ? readword(base + i * 4) : 0;
         if (mask[i / 8] & (1u << (i % 8))) {
-            if (c->transfer == ENCODE) {
-                uint32_t delta = readword(current + i * 4) - previous;
-                varint(c, (delta << 1) ^ (0u - (delta >> 31)));
-            } else {
-                uint32_t delta = varint(c, 0);
-                value += (delta >> 1) ^ (0u - (delta & 1));
-            }
+            uint32_t delta = varint(c, 0);
+            value += (delta >> 1) ^ (0u - (delta & 1));
         }
-        if (c->transfer == DECODE) word(out, value);
+        word(out, value);
     }
 }
 
@@ -331,9 +337,9 @@ Snapshot replica_delta_pack(const Snapshot *raw, const Snapshot *base) {
     Codec codec = {.transfer = ENCODE};
     wide(&codec, fingerprint(base));
     wide(&codec, fingerprint(raw));
-    entity(&codec, NULL, raw->data, base->data, HEADER_BYTES);
+    entity_encode(&codec, raw->data, base->data, HEADER_BYTES);
     for (int i = 0; i < ACTOR_COUNT; ++i)
-        entity(&codec, NULL, raw->data + HEADER_BYTES + i * ACTOR_BYTES,
+        entity_encode(&codec, raw->data + HEADER_BYTES + i * ACTOR_BYTES,
             base->data + HEADER_BYTES + i * ACTOR_BYTES, ACTOR_BYTES);
     varint(&codec, current.projectile_count);
     uint32_t previous_index = 0;
@@ -346,11 +352,11 @@ Snapshot replica_delta_pack(const Snapshot *raw, const Snapshot *base) {
         const unsigned char *old = previous_index < previous.projectile_count &&
             readwide(previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES) == id ?
             previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES : NULL;
-        entity(&codec, NULL, p + 8, old ? old + 8 : NULL, PROJECTILE_BYTES - 8);
+        entity_encode(&codec, p + 8, old ? old + 8 : NULL, PROJECTILE_BYTES - 8);
     }
     varint(&codec, current.pickup_count);
     for (uint32_t i = 0; i < current.pickup_count; ++i)
-        entity(&codec, NULL, current.pickups + (size_t)i * PICKUP_BYTES,
+        entity_encode(&codec, current.pickups + (size_t)i * PICKUP_BYTES,
             i < previous.pickup_count ? previous.pickups + (size_t)i * PICKUP_BYTES : NULL, PICKUP_BYTES);
     Snapshot changes = {codec.data, codec.offset};
     Snapshot packed = snapshot_pack(&changes);
@@ -367,9 +373,9 @@ int replica_delta_unpack(Snapshot *raw, const Snapshot *base, const unsigned cha
     Codec out = {.transfer = ENCODE};
     uint64_t base_hash = wide(&codec, 0), result_hash = wide(&codec, 0);
     if (base_hash != fingerprint(base)) codec.rejected = 1;
-    entity(&codec, &out, NULL, base->data, HEADER_BYTES);
+    entity_decode(&codec, &out, base->data, HEADER_BYTES);
     for (int i = 0; i < ACTOR_COUNT && !codec.rejected; ++i)
-        entity(&codec, &out, NULL, base->data + HEADER_BYTES + i * ACTOR_BYTES, ACTOR_BYTES);
+        entity_decode(&codec, &out, base->data + HEADER_BYTES + i * ACTOR_BYTES, ACTOR_BYTES);
     uint32_t count = varint(&codec, 0);
     if (count > (codec.size - codec.offset) / 10) codec.rejected = 1;
     word(&out, count);
@@ -385,13 +391,13 @@ int replica_delta_unpack(Snapshot *raw, const Snapshot *base, const unsigned cha
         const unsigned char *old = previous_index < previous.projectile_count &&
             readwide(previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES) == id ?
             previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES : NULL;
-        entity(&codec, &out, NULL, old ? old + 8 : NULL, PROJECTILE_BYTES - 8);
+        entity_decode(&codec, &out, old ? old + 8 : NULL, PROJECTILE_BYTES - 8);
     }
     count = varint(&codec, 0);
     if (count > (codec.size - codec.offset) / 2) codec.rejected = 1;
     word(&out, count);
     for (uint32_t i = 0; i < count && !codec.rejected; ++i)
-        entity(&codec, &out, NULL,
+        entity_decode(&codec, &out,
             i < previous.pickup_count ? previous.pickups + (size_t)i * PICKUP_BYTES : NULL, PICKUP_BYTES);
     Snapshot decoded = {out.data, out.offset};
     int valid = !codec.rejected && codec.offset == codec.size && fingerprint(&decoded) == result_hash;
