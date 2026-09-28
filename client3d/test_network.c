@@ -243,8 +243,8 @@ static void latency_contract(int population) {
     printf("Latency %d actors: 200ms RTT, loss %.1f%%/%.1f%%, 240Hz max remote step %.4f, correction mean %.4f max %.4f, traffic %.1f/%.1f KiB/s up/down, snapshots %llu/600, datagrams %.2f/update, repaired %llu, stalledframes %d/1916, viewlag mean %.3f max %.3f ticks\n",
         population, 100.0 * uplink.lost / uplink.captured, 100.0 * downlink.lost / downlink.captured, maximum_step,
         up.correction_distance / up.snapshots, up.max_correction, up.sent_bytes / 10240.0, down.sent_bytes / 10240.0, (unsigned long long)up.snapshots, down.sent_packets / 602.0, (unsigned long long)up.repaired_fragments, stalled, total_lag / 1916, maximum_lag);
-    check(stalled <= (population == 8 ? 1 : 0) && maximum_lag <= SRC_MAX_OLDPOS,
-        "impaired remote presentation keeps moving within the authoritative hit-history window");
+    check(!stalled, "impaired remote presentation keeps moving");
+    check(maximum_lag < 10, "known loss and jitter keep the remote view within ten source ticks");
     free(authority.data); free(replica.data); free(uplink.packets); free(downlink.packets);
     network_close(peer); network_close(server);
     check(close(front) == 0 && close(back) == 0, "close both relay sockets");

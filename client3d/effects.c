@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static Texture2D texture(const char *path) {
     Texture2D result = LoadTexture(TextFormat("%s/%s", SOLDAT_ASSET_DIR, path));
@@ -184,7 +185,7 @@ static void solid(Effects *effects,Model model, Vec3 position, Vec3 axis, Vec3 s
     EffectBatch *batch=&effects->batches[index];
     if(batch->count==batch->capacity) {
         batch->capacity=batch->capacity ? batch->capacity*2 : 16;
-        Matrix *transforms=realloc(batch->transforms,batch->capacity*sizeof(*transforms));
+        float (*transforms)[16]=realloc(batch->transforms,batch->capacity*sizeof(*transforms));
         if(!transforms)abort();
         batch->transforms=transforms;
     }
@@ -193,7 +194,7 @@ static void solid(Effects *effects,Model model, Vec3 position, Vec3 axis, Vec3 s
     Matrix transform=MatrixMultiply(MatrixScale(size.x,size.y,size.z),MatrixRotateZ(pitch));
     transform=MatrixMultiply(transform,MatrixRotateY(-yaw));
     transform=MatrixMultiply(transform,MatrixTranslate(position.x,position.y,position.z));
-    batch->transforms[batch->count++]=MatrixMultiply(model.transform,transform);
+    memcpy(batch->transforms[batch->count++],MatrixToFloat(MatrixMultiply(model.transform,transform)),sizeof(*batch->transforms));
 }
 
 static void sprite(Camera3D camera, Texture2D texture, Vec3 position, float scale, Color color) {
@@ -245,6 +246,7 @@ void effects_draw(Effects *effects, const Game *game, Camera3D camera, float alp
         if (flag->state==FLAG_BASE)
             DrawCylinder((Vector3){flag->base.x,flag->base.y-8.1f,flag->base.z},6,6,.2f,20,Fade(color,.65f));
     }
+    gostek_begin();
     for (size_t i = 0; i < game->pickup_count; ++i) {
         const Pickup *item = &game->pickups[i];
         if ((item->kind==PICKUP_WEAPON || item->kind==PICKUP_BOW) && item->ticks<300 && item->ticks%6<3) continue;
@@ -281,6 +283,7 @@ void effects_draw(Effects *effects, const Game *game, Camera3D camera, float alp
             solid(effects,effects->bullets[p->weapon], position, p->velocity, v3(trail, 1, 1), WHITE);
         }
     }
+    gostek_end();
     for (size_t i = 0; i < effects->count; ++i) {
         const VisualEvent *fx = &effects->events[i];
         float age = (float)(visual_tick - fx->tick);
@@ -358,18 +361,53 @@ void effects_draw(Effects *effects, const Game *game, Camera3D camera, float alp
         }
     }
     rlDrawRenderBatchActive();
+    size_t instance_count=0;
+    for(size_t i=0;i<effects->batch_count;++i)instance_count+=effects->batches[i].count;
+    if(instance_count>effects->instance_capacity) {
+        if(effects->instance_buffer)rlUnloadVertexBuffer(effects->instance_buffer);
+        effects->instance_capacity=instance_count*2;
+        effects->instance_data=realloc(effects->instance_data,effects->instance_capacity*sizeof(*effects->instance_data));
+        if(!effects->instance_data)abort();
+        effects->instance_buffer=rlLoadVertexBuffer(NULL,(int)(effects->instance_capacity*sizeof(*effects->instance_data)),true);
+        if(!effects->instance_buffer)abort();
+    }
+    size_t offset=0;
+    for(size_t i=0;i<effects->batch_count;++i) {
+        const EffectBatch *batch=&effects->batches[i];
+        if(!batch->count)continue;
+        memcpy(effects->instance_data+offset,batch->transforms,batch->count*sizeof(*batch->transforms));
+        offset+=batch->count;
+    }
+    if(instance_count)rlUpdateVertexBuffer(effects->instance_buffer,effects->instance_data,(int)(instance_count*sizeof(*effects->instance_data)),0);
+    Shader shader=effects->instance_shader;
+    rlEnableShader(shader.id);
+    rlSetUniformMatrix(shader.locs[SHADER_LOC_MATRIX_MVP],MatrixMultiply(rlGetMatrixModelview(),rlGetMatrixProjection()));
+    int texture_unit=0;
+    rlSetUniform(shader.locs[SHADER_LOC_MAP_DIFFUSE],&texture_unit,SHADER_UNIFORM_INT,1);
+    rlActiveTextureSlot(0);
+    offset=0;
     for(size_t i=0;i<effects->batch_count;++i) {
         const EffectBatch *batch=&effects->batches[i];
         if(!batch->count)continue;
         for(int m=0;m<batch->model.meshCount;++m) {
             Material material=batch->model.materials[batch->model.meshMaterial[m]];
-            Color original=material.maps[MATERIAL_MAP_DIFFUSE].color;
-            material.shader=effects->instance_shader;
-            material.maps[MATERIAL_MAP_DIFFUSE].color=ColorTint(original,batch->color);
-            DrawMeshInstanced(batch->model.meshes[m],material,batch->transforms,(int)batch->count);
-            material.maps[MATERIAL_MAP_DIFFUSE].color=original;
+            Color color=ColorTint(material.maps[MATERIAL_MAP_DIFFUSE].color,batch->color);
+            float tint[4]={color.r/255.0f,color.g/255.0f,color.b/255.0f,color.a/255.0f};
+            rlSetUniform(shader.locs[SHADER_LOC_COLOR_DIFFUSE],tint,SHADER_UNIFORM_VEC4,1);
+            if(!rlEnableVertexArray(batch->model.meshes[m].vaoId))abort();
+            rlEnableVertexBuffer(effects->instance_buffer);
+            for(int column=0;column<4;++column) {
+                unsigned location=(unsigned)(shader.locs[SHADER_LOC_VERTEX_INSTANCETRANSFORM]+column);
+                rlSetVertexAttribute(location,4,RL_FLOAT,false,sizeof(*effects->instance_data),
+                    (int)(offset*sizeof(*effects->instance_data)+column*4*sizeof(float)));
+                rlEnableVertexAttribute(location);rlSetVertexAttributeDivisor(location,1);
+            }
+            rlEnableTexture(material.maps[MATERIAL_MAP_DIFFUSE].texture.id);
+            rlDrawVertexArrayInstanced(0,batch->model.meshes[m].vertexCount,(int)batch->count);
         }
+        offset+=batch->count;
     }
+    rlDisableVertexArray();rlDisableVertexBuffer();rlDisableTexture();rlDisableShader();
     rlDisableDepthMask();
     for (size_t i = 0; i < effects->count; ++i) {
         const VisualEvent *fx = &effects->events[i];
@@ -415,6 +453,8 @@ void effects_draw(Effects *effects, const Game *game, Camera3D camera, float alp
 }
 
 void effects_unload(Effects *effects) {
+    if(effects->instance_buffer)rlUnloadVertexBuffer(effects->instance_buffer);
+    free(effects->instance_data);
     for(size_t i=0;i<effects->batch_count;++i)free(effects->batches[i].transforms);
     free(effects->batches);
     UnloadShader(effects->instance_shader);

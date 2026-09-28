@@ -63,10 +63,16 @@ enum {
     INPUT_GRENADE = 1u << 6, INPUT_SWITCH = 1u << 7, INPUT_ROLL = 1u << 8,
     INPUT_THROW = 1u << 9, INPUT_FLAG_THROW = 1u << 10
 };
+typedef enum { REWIND_NONE, REWIND_RENDERED } RewindMode;
+typedef struct {
+    RewindMode mode;
+    uint64_t before_tick, after_tick, applied_tick;
+    float fraction;
+} Rewind;
 typedef struct {
     float right, forward, yaw, pitch;
     uint32_t held, pressed;
-    float rewind_ticks;
+    Rewind rewind;
     uint64_t command_sequence;
 } Input;
 
@@ -123,7 +129,8 @@ typedef struct {
     int owner, ticks, ricochets, degrade_count;
     int flag_hit_ticks[3];
     uint32_t hit_mask;
-    float hit_multiply, rewind_ticks;
+    float hit_multiply;
+    Rewind rewind;
     uint64_t id;
 } Projectile;
 typedef enum { EVENT_SHOT, EVENT_IMPACT, EVENT_EXPLOSION, EVENT_HIT, EVENT_KILL,
@@ -193,6 +200,7 @@ void game_select_team(Game *game, int actor, Team team);
 Input bot_input(Game *game, int index);
 void combat_step(Game *game, const Input inputs[ACTOR_COUNT]);
 void combat_history_enable(Game *game);
+void combat_history_record(Game *game);
 void combat_predict_actor(Game *game, int index, Input input);
 void combat_environment(Game *game, int actor, unsigned polygon_type);
 Vec3 combat_aim_target(const Game *game, int shooter, Vec3 start, Vec3 end, const Vec3 poses[ACTOR_COUNT][21]);

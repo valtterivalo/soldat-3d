@@ -26,6 +26,7 @@ int main(void) {
     world_init(); poses_init(); ragdolls_init();
     Game game, decoded = {0};
     game_init(&game, 931, MODE_DEATHMATCH);
+    game.tick = UINT64_C(0x1abcdef12);
     game.actors[0].force = v3(.00390625f, .48f, -.19599999f);
     game.actors[0].move_direction = v3(.25f, 0, -.75f);
     game.actors[0].nav_edge = 17;
@@ -47,9 +48,10 @@ int main(void) {
     if (!game.projectiles) abort();
     game.projectiles[0] = (Projectile){.id = 31, .weapon = AK74, .owner = 0, .ticks = 41,
         .position = {100, 75.125f, -89}, .previous = {99, 74, -80}, .velocity = {3, -2, 15},
-        .hit_mask = 123, .rewind_ticks = 3.5f};
+        .hit_mask = 123, .rewind = {.mode = REWIND_RENDERED, .before_tick = 1, .after_tick = 4,
+            .applied_tick = 8, .fraction = .5f}};
     game.projectiles[1] = (Projectile){.id = 39, .weapon = BARRETT, .owner = 3, .ticks = 120,
-        .position = {-100, 65.25f, 79}, .velocity = {13, 2, -15}};
+        .position = {-100, 0, .000001f}, .velocity = {13, 2, -15}};
     Snapshot untouched = snapshot_encode(&game), base = replica_encode(&game);
     Snapshot after = snapshot_encode(&game);
     check(untouched.size == after.size && !memcmp(untouched.data, after.data, after.size),
@@ -78,7 +80,7 @@ int main(void) {
         !memcmp(&decoded.projectiles[0].velocity, &game.projectiles[0].velocity, sizeof(Vec3)),
         "rendered projectile identities and motion remain exact");
     check(decoded.event_count == 0 && decoded.history == NULL && decoded.actors[0].nav_goal == 0 &&
-        decoded.projectiles[0].rewind_ticks == 0, "server-only work is absent from replicas");
+        decoded.projectiles[0].rewind.mode == REWIND_NONE, "server-only work is absent from replicas");
     Snapshot copy = replica_encode(&decoded);
     check(copy.size == base.size && !memcmp(copy.data, base.data, copy.size), "replica decoding preserves its wire projection");
     free(copy.data);
@@ -92,6 +94,7 @@ int main(void) {
     game.actors[1].life = ALIVE;
     game.projectiles[0] = game.projectiles[1];
     game.projectiles[1] = (Projectile){.id = 71, .weapon = LAW, .owner = 0, .ticks = 50, .position = {12, 45, 69}, .velocity = {3, 2, 1}};
+    game.tick += 3;
     Snapshot current = replica_encode(&game), delta = replica_delta_pack(&current, &base), restored = {0};
     check(replica_delta_unpack(&restored, &base, delta.data, delta.size), "delta handles births, deaths and projectile removals and insertions");
     check(restored.size == current.size && !memcmp(restored.data, current.data, current.size), "entity deltas restore exact projected bytes");
@@ -99,6 +102,17 @@ int main(void) {
     if (!wrong.data) abort();
     memcpy(wrong.data, base.data, base.size); wrong.data[12] ^= 1;
     unsigned char *saved = restored.data;
+    Snapshot unchanged = replica_delta_pack(&base, &base), payload = {0};
+    check(snapshot_unpack(&payload, unchanged.data, unchanged.size), "delta payload decompresses");
+    Snapshot legacy_payload = {payload.data + 4, payload.size - 4};
+    Snapshot legacy = snapshot_pack(&legacy_payload);
+    check(!replica_delta_unpack(&restored, &base, legacy.data, legacy.size) && restored.data == saved,
+        "previous unversioned delta format rejects atomically");
+    payload.data[0] ^= 1;
+    Snapshot unknown = snapshot_pack(&payload);
+    check(!replica_delta_unpack(&restored, &base, unknown.data, unknown.size) && restored.data == saved,
+        "unknown delta format rejects atomically");
+    free(unchanged.data); free(payload.data); free(legacy.data); free(unknown.data);
     check(!replica_delta_unpack(&restored, &wrong, delta.data, delta.size) && restored.data == saved,
         "wrong acknowledged baseline rejects without replacing state");
     free(wrong.data);
@@ -119,6 +133,14 @@ int main(void) {
     current.data[0] ^= 1;
     check(!replica_decode(&decoded, current.data, current.size) && decoded.tick == tick, "unknown replica schema rejects atomically");
     current.data[0] ^= 1;
+    uint64_t ticks[] = {game.tick + 1, game.tick + 125, 0, game.tick + (UINT64_C(1) << 32)};
+    for (size_t i = 0; i < sizeof(ticks) / sizeof(*ticks); ++i) {
+        game.tick = ticks[i];
+        Snapshot raw = replica_encode(&game), packed = replica_delta_pack(&raw, &base), result = {0};
+        check(replica_delta_unpack(&result, &base, packed.data, packed.size) && result.size == raw.size &&
+            !memcmp(result.data, raw.data, raw.size), "integer predictions preserve exact state across clock gaps and resets");
+        free(raw.data); free(packed.data); free(result.data);
+    }
     free(restored.data); free(delta.data); free(current.data); free(base.data);
     game_free(&game); game_free(&decoded);
     ragdolls_free(); poses_free(); world_free();

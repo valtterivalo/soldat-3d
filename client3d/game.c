@@ -245,4 +245,5 @@ void game_step(Game *game, const Input inputs[ACTOR_COUNT]) {
     pickups_step(game);
     objectives_step(game, inputs);
     ++game->tick;
+    combat_history_record(game);
 }

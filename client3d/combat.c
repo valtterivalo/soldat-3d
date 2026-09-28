@@ -28,7 +28,7 @@ static WorldHit bullet_trace(Vec3 start, Vec3 end, Team team) {
     return world_trace_for(start,end,v3(0,0,0),(WorldQuery){WORLD_TRACE_BULLET,team,WORLD_NO_FLAG});
 }
 
-static void projectile_create(Game *game, int owner, WeaponId weapon, Vec3 origin, Vec3 velocity, float rewind_ticks) {
+static void projectile_create(Game *game, int owner, WeaponId weapon, Vec3 origin, Vec3 velocity, Rewind rewind) {
     if (game->projectile_count == game->projectile_capacity) {
         size_t capacity = game->projectile_capacity ? game->projectile_capacity * 2 : 64;
         Projectile *projectiles = realloc(game->projectiles, capacity * sizeof(*projectiles));
@@ -42,7 +42,7 @@ static void projectile_create(Game *game, int owner, WeaponId weapon, Vec3 origi
     game->projectiles[game->projectile_count++] = (Projectile){
         .position = origin, .previous = origin, .initial = origin, .hit_spot = origin, .velocity = velocity,
         .owner = owner, .weapon = weapon, .ticks = weapons[weapon].timeout,
-        .hit_multiply = weapons[weapon].hit_multiply, .rewind_ticks = rewind_ticks,
+        .hit_multiply = weapons[weapon].hit_multiply, .rewind = rewind,
         .id = ++game->next_projectile_id
     };
 }
@@ -115,14 +115,14 @@ void combat_environment(Game *game,int index,unsigned type) {
             if ((int)(game_random(game)*10)==0) actor->health-=5;
             if (actor->health<1) damage_actor(game,index,index,NOWEAPON,10,12);
             if (type==9 && (int)(game_random(game)*3)==0 && (int)(game_random(game)*3)==0)
-                projectile_create(game,index,FLAMER,add(actor->position,v3(0,3,0)),scale(actor->velocity,-1),0);
+                projectile_create(game,index,FLAMER,add(actor->position,v3(0,3,0)),scale(actor->velocity,-1),(Rewind){0});
             break;
         case 8:
             if (actor->health<SRC_DEFAULT_HEALTH && game->tick%12==0)
                 damage_actor(game,index,index,NOWEAPON,-2,12);
             break;
         case 19:
-            projectile_create(game,index,M79,add(actor->position,v3(0,3,0)),v3(0,0,0),0);
+            projectile_create(game,index,M79,add(actor->position,v3(0,3,0)),v3(0,0,0),(Rewind){0});
             damage_actor(game,index,index,M79,4000,12);
             actor->health=-600;
             if (actor->life==DEAD) ragdoll_dismember(actor,12);
@@ -139,12 +139,8 @@ enum { SOURCE_PARTS=7, HIT_PARTS=11 };
 typedef enum { HIT_SPHERE,HIT_CAPSULE } HitShape;
 typedef struct { Vec3 center,end;float radius,modifier;int bone;HitShape shape; } BodyPoint;
 
-static void body_points(const Actor *actor, const WeaponDef *weapon, const Vec3 *bones, BodyPoint points[HIT_PARTS]) {
-    Vec3 authoritative[21];
-    if (!bones) {
-        actor_pose(actor,authoritative);
-        bones=authoritative;
-    }
+static void body_points(Life life, Vec3 aim, const WeaponDef *weapon, const Vec3 bones[21],
+    BodyPoint points[HIT_PARTS]) {
     const int indices[SOURCE_PARTS]={12,11,10,6,5,4,3};
     for (int i=0;i<SOURCE_PARTS;i++) {
         points[i]=(BodyPoint){.center=bones[indices[i]],.end=bones[indices[i]],.radius=SRC_PART_RADIUS,
@@ -156,7 +152,7 @@ static void body_points(const Actor *actor, const WeaponDef *weapon, const Vec3 
     for(int side=0;side<2;++side) {
         int elbow=side ? 14 : 13,wrist=side ? 15 : 16;
         Vec3 forearm=sub(bones[wrist],bones[elbow]);
-        Vec3 hand=actor->life==DEAD ? sub(bones[side ? 19 : 20],bones[wrist]) : direction(actor->yaw,actor->pitch);
+        Vec3 hand=life==DEAD ? sub(bones[side ? 19 : 20],bones[wrist]) : aim;
         hand=scale(hand,1/length(hand));
         points[SOURCE_PARTS+2*side]=(BodyPoint){
             .center=sub(bones[elbow],scale(forearm,ACTOR_FOREARM_OVERLAP/length(forearm))),
@@ -169,39 +165,74 @@ static void body_points(const Actor *actor, const WeaponDef *weapon, const Vec3 
     }
 }
 
+enum { HISTORY_FRAMES = 2 * SRC_MAX_OLDPOS + 1 };
 typedef struct {
-    Vec3 points[HIT_PARTS],ends[HIT_PARTS];
+    Vec3 bones[21];
+    float yaw, pitch;
     uint32_t spawn_id;
     Life life;
     int protected;
 } HistoricalActor;
 typedef struct { uint64_t tick; HistoricalActor actors[ACTOR_COUNT]; } HistoryFrame;
-struct CombatHistory { HistoryFrame frames[SRC_MAX_OLDPOS + 1]; };
+struct CombatHistory { HistoryFrame frames[HISTORY_FRAMES]; };
+
+void combat_history_record(Game *game) {
+    if (!game->history) return;
+    HistoryFrame *frame = &game->history->frames[game->tick % HISTORY_FRAMES];
+    frame->tick = game->tick;
+    for (int i = 0; i < ACTOR_COUNT; ++i) {
+        const Actor *actor = &game->actors[i];
+        HistoricalActor *saved = &frame->actors[i];
+        saved->spawn_id = actor->spawn_id;
+        saved->life = actor->life;
+        saved->protected = actor->life == ALIVE && actor->spawn_protection_ticks >= 0;
+        saved->yaw = actor->yaw;
+        saved->pitch = actor->pitch;
+        if (actor->life != INACTIVE) actor_pose(actor, saved->bones);
+    }
+}
 
 void combat_history_enable(Game *game) {
     if (game->history) return;
     game->history = calloc(1, sizeof(*game->history));
     if (!game->history) abort();
+    combat_history_record(game);
 }
 
 static int historical_body(const Game *game, int target, const WeaponDef *weapon,
-    float rewind_ticks, BodyPoint points[HIT_PARTS]) {
+    Rewind rewind, BodyPoint points[HIT_PARTS]) {
     const Actor *actor = &game->actors[target];
-    body_points(actor, weapon, NULL, points);
-    if (!game->history || rewind_ticks <= 0) return 1;
-    double tick = (double)game->tick + 1 - rewind_ticks;
-    if (tick < 1) return 0;
-    uint64_t before = (uint64_t)floor(tick), after = (uint64_t)ceil(tick);
-    const HistoryFrame *a = &game->history->frames[before % (SRC_MAX_OLDPOS + 1)];
-    const HistoryFrame *b = &game->history->frames[after % (SRC_MAX_OLDPOS + 1)];
+    Vec3 bones[21];
+    if (rewind.mode == REWIND_NONE) {
+        actor_pose(actor, bones);
+        body_points(actor->life, direction(actor->yaw, actor->pitch), weapon, bones, points);
+        return 1;
+    }
+    if (!game->history) {
+        fprintf(stderr, "Rendered rewind requires combat history\n");
+        abort();
+    }
+    uint64_t before = rewind.before_tick, after = rewind.after_tick;
+    float fraction = rewind.fraction;
+    uint64_t elapsed = game->tick + 1 - rewind.applied_tick;
+    double advance = (double)(after - before) * fraction + (double)elapsed;
+    if (advance > (double)(after - before)) {
+        uint64_t whole = (uint64_t)floor(advance);
+        before += whole;
+        after = before + (advance > (double)whole);
+        fraction = (float)(advance - whole);
+    } else if (before != after) fraction = (float)((double)fraction + (double)elapsed / (after - before));
+    const HistoryFrame *a = &game->history->frames[before % HISTORY_FRAMES];
+    const HistoryFrame *b = &game->history->frames[after % HISTORY_FRAMES];
     if (a->tick != before || b->tick != after) return 0;
     const HistoricalActor *left = &a->actors[target], *right = &b->actors[target];
     if (left->spawn_id != actor->spawn_id || right->spawn_id != actor->spawn_id ||
         left->life != actor->life || right->life != actor->life || left->protected || right->protected) return 0;
-    for (int i = 0; i < HIT_PARTS; ++i) {
-        points[i].center = add(left->points[i], scale(sub(right->points[i], left->points[i]), (float)(tick - before)));
-        points[i].end = add(left->ends[i],scale(sub(right->ends[i],left->ends[i]),(float)(tick-before)));
-    }
+    for (int i = 1; i <= 20; ++i)
+        bones[i] = add(left->bones[i], scale(sub(right->bones[i], left->bones[i]), fraction));
+    float yaw = left->yaw + atan2f(sinf(right->yaw - left->yaw), cosf(right->yaw - left->yaw)) * fraction;
+    float pitch = left->pitch + (right->pitch - left->pitch) * fraction;
+    body_points(actor->life, direction(yaw, pitch), weapon, bones, points);
     return 1;
 }
 
@@ -247,7 +278,10 @@ Vec3 combat_aim_target(const Game *game, int shooter, Vec3 start, Vec3 end, cons
     for (int i = 0; i < ACTOR_COUNT; i++) {
         if (i == shooter || game->actors[i].life != ALIVE || game->actors[i].spawn_protection_ticks >= 0) continue;
         BodyPoint points[HIT_PARTS];
-        body_points(&game->actors[i], weapon, poses ? poses[i] : NULL, points);
+        Vec3 bones[21];
+        if (!poses) actor_pose(&game->actors[i], bones);
+        body_points(game->actors[i].life, direction(game->actors[i].yaw, game->actors[i].pitch),
+            weapon, poses ? poses[i] : bones, points);
         for (int part = 0; part < HIT_PARTS; part++)
             fraction = fminf(fraction, body_fraction(start,delta,&points[part],0));
     }
@@ -270,7 +304,7 @@ static void explode(Game *game, Projectile projectile, WeaponId damage_weapon, f
         Actor *actor = &game->actors[i];
         if (actor->life != ALIVE) continue;
         BodyPoint points[HIT_PARTS];
-        if (!historical_body(game, i, weapon, projectile.rewind_ticks, points)) continue;
+        if (!historical_body(game, i, weapon, projectile.rewind, points)) continue;
         int nearest = 0;
         float distance = length(sub(projectile.position, points[0].center));
         for (int j = 1; j < SOURCE_PARTS; j++) {
@@ -366,12 +400,12 @@ static void fire_weapon(Game *game, int index, Input input) {
             const Actor *other = &game->actors[target];
             if (target == index || other->life == INACTIVE || (other->life == ALIVE && other->spawn_protection_ticks >= 0)) continue;
             BodyPoint points[HIT_PARTS];
-            if (!historical_body(game, target, weapon, input.rewind_ticks, points)) continue;
+            if (!historical_body(game, target, weapon, input.rewind, points)) continue;
             for (int part = 0; part < HIT_PARTS; ++part)
                 clearance = fminf(clearance, body_fraction(shoulder,barrel,&points[part],0));
         }
         muzzle=add(shoulder,scale(barrel,clearance));
-        projectile_create(game, index, state->id, muzzle, pellet, input.rewind_ticks);
+        projectile_create(game, index, state->id, muzzle, pellet, input.rewind);
     }
     if (state->id == SPAS12)
         actor->velocity = sub(actor->velocity, v3(velocity.x * 0.0412f,
@@ -419,7 +453,7 @@ static void actor_controls(Game *game, int i, Input input) {
             Vec3 velocity = add(scale(direction(actor->yaw,actor->pitch), weapons[THROWNKNIFE].speed * 1.5f * charge),
                 scale(actor->velocity,weapons[THROWNKNIFE].inherited_velocity));
             Vec3 muzzle = actor_muzzle(actor);
-            projectile_create(game,i,THROWNKNIFE,muzzle,velocity,input.rewind_ticks);
+            projectile_create(game,i,THROWNKNIFE,muzzle,velocity,input.rewind);
             pickups_weapon(actor,actor->active_slot,NOWEAPON,weapons[NOWEAPON].ammo);
             combat_event(game,(GameEvent){EVENT_SHOT,muzzle,i,-1,THROWNKNIFE});
             actor->throw_frame=0;
@@ -508,7 +542,7 @@ static void actor_controls(Game *game, int i, Input input) {
                 Vec3 velocity = add(scale(aim, speed / length(aim)),
                                     scale(actor->velocity, weapons[grenade].inherited_velocity));
                 Vec3 origin = actor_muzzle(actor);
-                projectile_create(game, i, grenade, origin, velocity, input.rewind_ticks);
+                projectile_create(game, i, grenade, origin, velocity, input.rewind);
                 actor->grenades--;
                 combat_event(game, (GameEvent){EVENT_SHOT, origin, i, -1, grenade});
             }
@@ -533,25 +567,6 @@ void combat_step(Game *game, const Input inputs[ACTOR_COUNT]) {
     for (int i = 0; i < ACTOR_COUNT; ++i)
         if (game->actors[i].life == ALIVE) actor_controls(game, i, inputs[i]);
 
-    if (game->history) {
-        uint64_t tick = game->tick + 1;
-        HistoryFrame *frame = &game->history->frames[tick % (SRC_MAX_OLDPOS + 1)];
-        frame->tick = tick;
-        for (int i = 0; i < ACTOR_COUNT; ++i) {
-            const Actor *actor = &game->actors[i];
-            HistoricalActor *saved = &frame->actors[i];
-            saved->spawn_id = actor->spawn_id;
-            saved->life = actor->life;
-            saved->protected = actor->life == ALIVE && actor->spawn_protection_ticks >= 0;
-            if (actor->life == INACTIVE) continue;
-            BodyPoint points[HIT_PARTS];
-            body_points(actor, &weapons[AK74], NULL, points);
-            for (int part = 0; part < HIT_PARTS; ++part) {
-                saved->points[part]=points[part].center;
-                saved->ends[part]=points[part].end;
-            }
-        }
-    }
     size_t surviving = 0;
     for (size_t i = 0; i < game->projectile_count; i++) {
         Projectile projectile = game->projectiles[i];
@@ -576,7 +591,7 @@ void combat_step(Game *game, const Input inputs[ACTOR_COUNT]) {
                     (projectile.hit_mask & (1u << target)) ||
                     (target == projectile.owner && age <= owner_delay)) continue;
                 BodyPoint points[HIT_PARTS];
-                if (!historical_body(game, target, weapon, projectile.rewind_ticks, points)) continue;
+                if (!historical_body(game, target, weapon, projectile.rewind, points)) continue;
                 for (int part = 0; part < HIT_PARTS; part++) {
                     float contact = body_fraction(projectile.position,projectile.velocity,&points[part],
                         projectile.weapon == FRAGGRENADE ? 1 : 0);
@@ -626,7 +641,7 @@ void combat_step(Game *game, const Input inputs[ACTOR_COUNT]) {
                         if (projectile.hit_multiply>=weapons[FLAMER].hit_multiply/3) {
                             projectile.ticks=SRC_FLAMER_TIMEOUT-1;
                             ++projectile.ricochets;
-                            projectile_create(game,projectile.owner,FLAMER,projectile.position,scale(actor->velocity,-1),projectile.rewind_ticks);
+                            projectile_create(game,projectile.owner,FLAMER,projectile.position,scale(actor->velocity,-1),projectile.rewind);
                             game->projectiles[game->projectile_count-1].hit_multiply=2*projectile.hit_multiply/3;
                         }
                         if (actor->health>=0)
@@ -665,7 +680,7 @@ void combat_step(Game *game, const Input inputs[ACTOR_COUNT]) {
                         Vec3 velocity=v3(.75f*projectile.velocity.x-2.5f+(int)(game_random(game)*50)*.1f,
                             -.75f*projectile.velocity.y+2.5f-(int)(game_random(game)*25)*.1f,
                             .75f*projectile.velocity.z-2.5f+(int)(game_random(game)*50)*.1f);
-                        projectile_create(game,projectile.owner,CLUSTER,origin,velocity,projectile.rewind_ticks);
+                        projectile_create(game,projectile.owner,CLUSTER,origin,velocity,projectile.rewind);
                         game->projectiles[game->projectile_count-1].hit_multiply=weapons[FRAGGRENADE].hit_multiply*.5f;
                     }
                     combat_event(game,(GameEvent){EVENT_EXPLOSION,projectile.position,projectile.owner,-1,CLUSTERGRENADE});

@@ -99,7 +99,8 @@ int main(void) {
     if (!game.projectiles) abort();
     game.projectiles[0]=(Projectile){.weapon=BARRETT,.owner=0,.ticks=100,
         .position={.25f,120.5f,-20.75f},.velocity={1.5f,2.25f,55},
-        .id=UINT64_C(0xfedcba9876543210),.rewind_ticks=3.75f};
+        .id=UINT64_C(0xfedcba9876543210),
+        .rewind={REWIND_RENDERED,game.tick-8,game.tick-4,game.tick-1,.375f}};
     Snapshot canonical=snapshot_encode(&game),packed=snapshot_pack(&canonical);
     Snapshot identical=snapshot_delta_pack(&canonical,&canonical);
     check(identical.size<packed.size,"acknowledged identical state compresses using its baseline dictionary");
@@ -129,12 +130,19 @@ int main(void) {
     check(restored.size==canonical.size && !memcmp(restored.data,canonical.data,canonical.size),
         "transport packing leaves canonical serialization unchanged");
     Game replica={0};
+    restored.data[7]^=1;
+    check(!snapshot_decode(&replica,restored.data,restored.size),"unsupported canonical version rejects before decoding state");
+    restored.data[7]^=1;
     check(snapshot_decode(&replica,restored.data,restored.size),"unpacked canonical state decodes");
     check(replica.actors[0].spawn_id==game.actors[0].spawn_id &&
         replica.actors[31].spawn_id==game.actors[31].spawn_id &&
         replica.actors[31].motion_tick==game.actors[31].motion_tick &&
         replica.actors[31].shot_sequence==game.actors[31].shot_sequence &&
-        replica.projectiles[0].id==game.projectiles[0].id && replica.projectiles[0].rewind_ticks==3.75f &&
+        replica.projectiles[0].id==game.projectiles[0].id && replica.projectiles[0].rewind.mode==REWIND_RENDERED &&
+        replica.projectiles[0].rewind.before_tick==game.tick-8 &&
+        replica.projectiles[0].rewind.after_tick==game.tick-4 &&
+        replica.projectiles[0].rewind.applied_tick==game.tick-1 &&
+        replica.projectiles[0].rewind.fraction==.375f &&
         replica.next_projectile_id==game.next_projectile_id && replica.next_event_id==game.next_event_id && replica.history==NULL,
         "spawn generations, motion timestamps and projectile identities round-trip without server history");
     Snapshot copy=snapshot_encode(&replica);

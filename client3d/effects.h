@@ -6,7 +6,7 @@
 #include "raylib.h"
 
 typedef struct { GameEvent event; uint64_t tick; } VisualEvent;
-typedef struct { Model model; Color color; Matrix *transforms; size_t count,capacity; } EffectBatch;
+typedef struct { Model model; Color color; float (*transforms)[16]; size_t count,capacity; } EffectBatch;
 typedef struct {
     VisualEvent *events;
     size_t count, capacity;
@@ -20,6 +20,9 @@ typedef struct {
     Shader instance_shader;
     EffectBatch *batches;
     size_t batch_count;
+    float (*instance_data)[16];
+    size_t instance_capacity;
+    unsigned instance_buffer;
 } Effects;
 
 Effects effects_load(void);

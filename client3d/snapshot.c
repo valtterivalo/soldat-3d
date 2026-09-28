@@ -149,6 +149,9 @@ static void actor_transfer(Codec *c, Actor *a) {
 }
 
 static void game_transfer(Codec *c, Game *game) {
+    uint32_t magic = word(c, UINT32_C(0x53334350));
+    uint32_t version = word(c, 1);
+    if (magic != UINT32_C(0x53334350) || version != 1) { c->rejected = 1; return; }
     game->tick = wide(c, game->tick);
     game->next_projectile_id = wide(c, game->next_projectile_id);
     game->next_event_id = wide(c, game->next_event_id);
@@ -186,7 +189,7 @@ static void game_transfer(Codec *c, Game *game) {
     }
     uint32_t projectiles = word(c, (uint32_t)game->projectile_count);
     if (c->transfer == DECODE) {
-        if (projectiles > (c->size - c->offset) / 112) { c->rejected = 1; return; }
+        if (projectiles > (c->size - c->offset) / 140) { c->rejected = 1; return; }
         game->projectile_count = game->projectile_capacity = projectiles;
         game->projectiles = projectiles ? calloc(projectiles, sizeof(Projectile)) : NULL;
         if (projectiles && !game->projectiles) abort();
@@ -205,10 +208,18 @@ static void game_transfer(Codec *c, Game *game) {
         p.degrade_count = integer(c, p.degrade_count);
         p.hit_mask = word(c, p.hit_mask);
         p.hit_multiply = scalar(c, p.hit_multiply);
-        p.rewind_ticks = scalar(c, p.rewind_ticks);
+        p.rewind.mode = word(c, p.rewind.mode);
+        p.rewind.before_tick = wide(c, p.rewind.before_tick);
+        p.rewind.after_tick = wide(c, p.rewind.after_tick);
+        p.rewind.applied_tick = wide(c, p.rewind.applied_tick);
+        p.rewind.fraction = scalar(c, p.rewind.fraction);
         p.id = wide(c, p.id);
         for (int flag = 0; flag < 3; ++flag) p.flag_hit_ticks[flag] = integer(c, p.flag_hit_ticks[flag]);
         if (p.weapon >= WEAPON_COUNT || p.owner < 0 || p.owner >= ACTOR_COUNT) c->rejected = 1;
+        if (p.rewind.mode > REWIND_RENDERED || (p.rewind.mode == REWIND_RENDERED &&
+            (p.rewind.before_tick > p.rewind.after_tick || p.rewind.after_tick > p.rewind.applied_tick ||
+             p.rewind.applied_tick - p.rewind.before_tick > SRC_MAX_OLDPOS ||
+             !(p.rewind.fraction >= 0 && p.rewind.fraction <= 1)))) c->rejected = 1;
         if (p.weapon == FLAMER && (p.ticks < 1 || p.ticks > SRC_FLAMER_TIMEOUT)) c->rejected = 1;
         if (c->transfer == DECODE) game->projectiles[i] = p;
     }

@@ -38,6 +38,7 @@ static void step(Game *game, uint32_t held, uint32_t pressed) {
     game->event_count = 0;
     combat_step(game, inputs);
     game->tick++;
+    combat_history_record(game);
 }
 
 int main(void) {
@@ -201,7 +202,7 @@ int main(void) {
         game.projectiles[0] = (Projectile){.position = start, .initial = start,
             .velocity = {18, 0, 0}, .weapon = COLT, .owner = 0,
             .ticks = SRC_BULLET_TIMEOUT, .hit_multiply = weapons[COLT].hit_multiply,
-            .rewind_ticks = scenario >= 4 ? 9.5f : 0};
+            .rewind = scenario >= 4 ? (Rewind){REWIND_RENDERED,1,2,11,.5f} : (Rewind){0}};
         step(&game, 0, 0);
         int hit = scenario < 2 || scenario == 4;
         equal("physical limb hits use chest damage and historical generation guards", target->health,
@@ -223,6 +224,107 @@ int main(void) {
     Vec3 shown = combat_aim_target(&game, 0, hand_start, hand_end, (const Vec3 (*)[21])shown_poses);
     equal("latest discrete throw pose does not cover the displayed hand", latest.x, hand_end.x);
     check("crosshair selects the interpolated hand actually displayed", shown.x < 0 && shown.x > -2);
+    game_free(&game);
+
+    for (int scenario = 0; scenario < 7; ++scenario) {
+        game = shooting_game(COLT);
+        Actor *target = &game.actors[1];
+        *target = game.actors[0];
+        target->position = v3(0, 1000, 0);
+        target->velocity = v3(0, 0, 0);
+        target->yaw = target->pitch = 0;
+        target->animation = MOVE_IDLE;
+        target->animation_tick = 1;
+        game_equip(target, AK74, COLT);
+        combat_history_enable(&game);
+        Actor before = *target, after = *target;
+        for (int tick = 1; tick <= 10; ++tick) {
+            game.tick = (uint64_t)tick;
+            target->grenade_charge = tick <= 5 ? tick - 1 : 4;
+            target->spawn_protection_ticks = scenario == 6 && tick == 1 ? 0 : -1;
+            if (tick == 1) before = *target;
+            if (tick == 5) after = *target;
+            combat_history_record(&game);
+        }
+        Vec3 poses[ACTOR_COUNT][21] = {0};
+        actor_pose_between(&before, &after, .5f, poses[1]);
+        Vec3 ray = v3(-20, 1014.625f, scenario == 3 ? 27 : 7);
+        target->grenade_charge = 2;
+        Vec3 displayed_hit = combat_aim_target(&game, 0, ray, add(ray, v3(40, 0, 0)),
+            (const Vec3 (*)[21])poses);
+        Vec3 intermediate_hit = combat_aim_target(&game, 0, ray, add(ray, v3(40, 0, 0)), NULL);
+        check("recorded snapshot interpolation covers the demonstrated forearm ray",
+            scenario == 3 ? displayed_hit.x == 20 : displayed_hit.x < 0);
+        equal("the intermediate server animation misses the demonstrated ray", intermediate_hit.x, 20);
+        target->position.z += 60;
+        if (scenario == 4) ++target->spawn_id;
+        if (scenario == 5) { ragdoll_start(target); target->life = DEAD; target->health = -1; }
+        float health = target->health;
+        game.projectiles = malloc(sizeof(*game.projectiles));
+        check("allocate rendered bracket projectile", game.projectiles != NULL);
+        game.projectile_count = game.projectile_capacity = 1;
+        game.projectiles[0] = (Projectile){.position = ray, .initial = ray, .velocity = {40, 0, 0},
+            .weapon = COLT, .owner = 0, .ticks = SRC_BULLET_TIMEOUT,
+            .hit_multiply = weapons[COLT].hit_multiply,
+            .rewind = scenario == 2 ? (Rewind){0} : scenario == 1 ?
+                (Rewind){REWIND_RENDERED,3,3,11,1} : (Rewind){REWIND_RENDERED,1,5,11,.5f}};
+        step(&game, 0, 0);
+        equal("physical rewind hits the displayed limb while preserving miss, protection and generation boundaries",
+            target->health, health - (scenario == 0 ? 40 * weapons[COLT].hit_multiply * weapons[COLT].modifier_chest : 0));
+        if (scenario == 0) {
+            check("rendered limb hit retains a physical penetrating projectile", game.projectile_count == 1);
+            equal("physical limb collision matches the rendered ray intersection",
+                game.projectiles[0].position.x, displayed_hit.x + 30);
+        }
+        game_free(&game);
+    }
+
+    game = shooting_game(BARRETT);
+    game.actors[1] = game.actors[0];
+    game.actors[1].position = v3(60, 1000, 120);
+    combat_history_enable(&game);
+    for (int tick = 1; tick <= 10; ++tick) {
+        game.tick = (uint64_t)tick;
+        game.actors[1].position.x = tick == 6 ? 0 : 60;
+        combat_history_record(&game);
+    }
+    game.projectiles = malloc(sizeof(*game.projectiles));
+    check("allocate continuing flight projectile", game.projectiles != NULL);
+    game.projectile_count = game.projectile_capacity = 1;
+    Vec3 flight_pose[21];
+    actor_pose(&game.actors[1], flight_pose);
+    game.projectiles[0] = (Projectile){.position = {0,flight_pose[11].y,0},
+        .velocity = {0,0,40}, .weapon = BARRETT, .owner = 0, .ticks = SRC_BULLET_TIMEOUT,
+        .hit_multiply = weapons[BARRETT].hit_multiply, .rewind = {REWIND_RENDERED,3,5,11,.5f}};
+    for (int tick = 0; tick < 2; ++tick) {
+        step(&game, 0, 0);
+        equal("rewound projectile keeps physical flight time through the snapshot endpoint",
+            game.actors[1].health, SRC_DEFAULT_HEALTH);
+    }
+    step(&game, 0, 0);
+    check("flight continues through the next authoritative pose after the accepted bracket",
+        game.actors[1].life == DEAD);
+    game_free(&game);
+
+    game = shooting_game(COLT);
+    game.actors[1] = game.actors[0];
+    game.actors[1].position = v3(0, 1000, 0);
+    combat_history_enable(&game);
+    for (int tick = 1; tick <= 190; ++tick) {
+        game.tick = (uint64_t)tick;
+        combat_history_record(&game);
+    }
+    actor_pose(&game.actors[1], flight_pose);
+    game.actors[1].position.z += 60;
+    game.projectiles = malloc(sizeof(*game.projectiles));
+    check("allocate oldest accepted bracket projectile", game.projectiles != NULL);
+    game.projectile_count = game.projectile_capacity = 1;
+    game.projectiles[0] = (Projectile){.position = {-20,flight_pose[11].y,flight_pose[11].z},
+        .velocity = {40,0,0}, .weapon = COLT, .owner = 0, .ticks = SRC_BULLET_TIMEOUT - 65,
+        .hit_multiply = weapons[COLT].hit_multiply, .rewind = {REWIND_RENDERED,1,100,126,.25f}};
+    step(&game, 0, 0);
+    check("accepted snapshot endpoints survive until physical flight leaves their bracket",
+        game.actors[1].health < SRC_DEFAULT_HEALTH);
     game_free(&game);
 
     game = shooting_game(KNIFE);
@@ -317,12 +419,14 @@ int main(void) {
         else game.actors[1].position.x = 60;
         game.actors[0].slots[0].startup_count = 0;
         Input shot[ACTOR_COUNT] = {0};
-        shot[0] = (Input){.held = INPUT_FIRE, .pressed = INPUT_FIRE, .rewind_ticks = scenario ? 9 : 0};
+        shot[0] = (Input){.held = INPUT_FIRE, .pressed = INPUT_FIRE, .rewind = scenario ? (Rewind){REWIND_RENDERED,2,2,11,1} : (Rewind){0}};
         combat_step(&game, shot);
         ++game.tick;
         check("rewound bullets still require physical flight time", game.actors[1].health == SRC_DEFAULT_HEALTH);
         check("physical shot carries source history delay", game.projectile_count == 1 &&
-            game.projectiles[0].rewind_ticks == shot[0].rewind_ticks);
+            game.projectiles[0].rewind.mode == shot[0].rewind.mode &&
+            game.projectiles[0].rewind.before_tick == shot[0].rewind.before_tick &&
+            game.projectiles[0].rewind.applied_tick == shot[0].rewind.applied_tick);
         for (int tick = 0; tick < 5; ++tick) step(&game, 0, 0);
         if (scenario == 1)
             check("150ms view delay registers on the moving target's historical body", game.actors[1].life == DEAD);
@@ -348,7 +452,7 @@ int main(void) {
     game.actors[1].position = add(wall_point,v3(0,-10,40));
     for (int tick = 0; tick < 10; ++tick) step(&game, 0, 0);
     Input covered[ACTOR_COUNT] = {0};
-    covered[0] = (Input){.held = INPUT_FIRE, .pressed = INPUT_FIRE, .rewind_ticks = 9};
+    covered[0] = (Input){.held = INPUT_FIRE, .pressed = INPUT_FIRE, .rewind = {REWIND_RENDERED,2,2,11,1}};
     combat_step(&game, covered);
     check("historical hit tests never bypass solid world cover", game.projectile_count == 0 && game.actors[1].health == SRC_DEFAULT_HEALTH);
     game_free(&game);

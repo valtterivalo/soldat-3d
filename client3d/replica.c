@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-enum { REPLICA_MAGIC = 0x53443352, HEADER_BYTES = 976, ACTOR_BYTES = 504, PROJECTILE_BYTES = 44, PICKUP_BYTES = 40 };
+enum { REPLICA_MAGIC = 0x53443352, DELTA_MAGIC = 0x53443344, HEADER_BYTES = 976,
+    ACTOR_BYTES = 504, ACTOR_POSITION = 28, ACTOR_PREVIOUS = 40,
+    PROJECTILE_BYTES = 44, PROJECTILE_POSITION = 8, PROJECTILE_VELOCITY = 20, PICKUP_BYTES = 40 };
 
 typedef enum { ENCODE, DECODE } Transfer;
 typedef struct {
@@ -245,6 +247,10 @@ static uint32_t readword(const unsigned char *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
+static void writeword(unsigned char *p, uint32_t value) {
+    p[0] = value >> 24; p[1] = value >> 16; p[2] = value >> 8; p[3] = value;
+}
+
 static uint64_t readwide(const unsigned char *p) {
     return (uint64_t)readword(p) << 32 | readword(p + 4);
 }
@@ -331,16 +337,49 @@ static void entity_decode(Codec *c, Codec *out, const unsigned char *base, size_
     }
 }
 
+static void actor_predict(unsigned char predicted[ACTOR_BYTES], const unsigned char *base, uint32_t ticks) {
+    memcpy(predicted, base, ACTOR_BYTES);
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        uint32_t position = readword(base + ACTOR_POSITION + axis * 4);
+        uint32_t velocity = position - readword(base + ACTOR_PREVIOUS + axis * 4);
+        for (unsigned previous = 0; previous < 2; ++previous)
+            writeword(predicted + ACTOR_POSITION + (previous * 3 + axis) * 4,
+                position + velocity * (ticks - previous));
+    }
+}
+
+static const unsigned char *projectile_predict(unsigned char predicted[PROJECTILE_BYTES],
+    const unsigned char *base, uint32_t ticks) {
+    if (!base) return NULL;
+    memcpy(predicted, base, PROJECTILE_BYTES);
+    for (unsigned axis = 0; axis < 3; ++axis) {
+        uint32_t position = readword(base + PROJECTILE_POSITION + axis * 4);
+        uint32_t velocity = readword(base + PROJECTILE_VELOCITY + axis * 4);
+        unsigned exponent = (velocity >> 23) & 255;
+        uint32_t mantissa = (velocity & UINT32_C(0x7fffff)) | (exponent ? UINT32_C(0x800000) : 0);
+        int shift = (int)exponent - (int)((position >> 23) & 255);
+        uint32_t change = shift >= 0 ? (shift < 32 ? mantissa << shift : 0) :
+            (shift > -32 ? mantissa >> -shift : 0);
+        if ((position ^ velocity) >> 31) change = 0u - change;
+        writeword(predicted + PROJECTILE_POSITION + axis * 4, position + change * ticks);
+    }
+    return predicted;
+}
+
 Snapshot replica_delta_pack(const Snapshot *raw, const Snapshot *base) {
     Layout current, previous;
     if (!layout(raw, &current) || !layout(base, &previous)) abort();
     Codec codec = {.transfer = ENCODE};
+    word(&codec, DELTA_MAGIC);
     wide(&codec, fingerprint(base));
     wide(&codec, fingerprint(raw));
     entity_encode(&codec, raw->data, base->data, HEADER_BYTES);
-    for (int i = 0; i < ACTOR_COUNT; ++i)
-        entity_encode(&codec, raw->data + HEADER_BYTES + i * ACTOR_BYTES,
-            base->data + HEADER_BYTES + i * ACTOR_BYTES, ACTOR_BYTES);
+    uint32_t ticks = (uint32_t)(readwide(raw->data + 4) - readwide(base->data + 4));
+    for (int i = 0; i < ACTOR_COUNT; ++i) {
+        unsigned char predicted[ACTOR_BYTES];
+        actor_predict(predicted, base->data + HEADER_BYTES + i * ACTOR_BYTES, ticks);
+        entity_encode(&codec, raw->data + HEADER_BYTES + i * ACTOR_BYTES, predicted, ACTOR_BYTES);
+    }
     varint(&codec, current.projectile_count);
     uint32_t previous_index = 0;
     for (uint32_t i = 0; i < current.projectile_count; ++i) {
@@ -352,6 +391,8 @@ Snapshot replica_delta_pack(const Snapshot *raw, const Snapshot *base) {
         const unsigned char *old = previous_index < previous.projectile_count &&
             readwide(previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES) == id ?
             previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES : NULL;
+        unsigned char predicted[PROJECTILE_BYTES];
+        old = projectile_predict(predicted, old, ticks);
         entity_encode(&codec, p + 8, old ? old + 8 : NULL, PROJECTILE_BYTES - 8);
     }
     varint(&codec, current.pickup_count);
@@ -371,11 +412,17 @@ int replica_delta_unpack(Snapshot *raw, const Snapshot *base, const unsigned cha
     if (!snapshot_unpack(&changes, packed, size)) return 0;
     Codec codec = {.data = changes.data, .size = changes.size, .transfer = DECODE};
     Codec out = {.transfer = ENCODE};
+    if (word(&codec, 0) != DELTA_MAGIC) codec.rejected = 1;
     uint64_t base_hash = wide(&codec, 0), result_hash = wide(&codec, 0);
     if (base_hash != fingerprint(base)) codec.rejected = 1;
     entity_decode(&codec, &out, base->data, HEADER_BYTES);
-    for (int i = 0; i < ACTOR_COUNT && !codec.rejected; ++i)
-        entity_decode(&codec, &out, base->data + HEADER_BYTES + i * ACTOR_BYTES, ACTOR_BYTES);
+    uint32_t ticks = 0;
+    if (!codec.rejected) ticks = (uint32_t)(readwide(out.data + 4) - readwide(base->data + 4));
+    for (int i = 0; i < ACTOR_COUNT && !codec.rejected; ++i) {
+        unsigned char predicted[ACTOR_BYTES];
+        actor_predict(predicted, base->data + HEADER_BYTES + i * ACTOR_BYTES, ticks);
+        entity_decode(&codec, &out, predicted, ACTOR_BYTES);
+    }
     uint32_t count = varint(&codec, 0);
     if (count > (codec.size - codec.offset) / 10) codec.rejected = 1;
     word(&out, count);
@@ -391,6 +438,8 @@ int replica_delta_unpack(Snapshot *raw, const Snapshot *base, const unsigned cha
         const unsigned char *old = previous_index < previous.projectile_count &&
             readwide(previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES) == id ?
             previous.projectiles + (size_t)previous_index * PROJECTILE_BYTES : NULL;
+        unsigned char predicted[PROJECTILE_BYTES];
+        old = projectile_predict(predicted, old, ticks);
         entity_decode(&codec, &out, old ? old + 8 : NULL, PROJECTILE_BYTES - 8);
     }
     count = varint(&codec, 0);

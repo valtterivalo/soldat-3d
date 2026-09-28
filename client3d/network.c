@@ -655,7 +655,7 @@ void network_inputs(Network *net, Input inputs[ACTOR_COUNT]) {
             peer->spawn_id = net->spawn_ids[i];
         }
         peer->input.pressed = 0;
-        peer->input.rewind_ticks = 0;
+        peer->input.rewind = (Rewind){0};
         if (!peer->started && peer->command_count) {
             peer->started = 1;
             peer->applied_sequence = peer->commands[0].sequence - 1;
@@ -676,7 +676,10 @@ void network_inputs(Network *net, Input inputs[ACTOR_COUNT]) {
                 command.view_frame <= peer->confirmed_frame && frame->sequence == command.view_frame &&
                 start->sequence == command.view_start_frame && start->map == net->map && frame->map == net->map && start->tick <= frame->tick) {
                 double view = fmin((double)frame->tick, fmax((double)start->tick, command.view_tick));
-                peer->input.rewind_ticks = (float)fmin(SRC_MAX_OLDPOS, fmax(0, (double)net->authority_tick + 1 - view));
+                uint64_t applied = net->authority_tick + 1;
+                if (applied >= frame->tick && applied - start->tick <= SRC_MAX_OLDPOS)
+                    peer->input.rewind = (Rewind){REWIND_RENDERED, start->tick, frame->tick, applied,
+                        start->tick == frame->tick ? 1 : (float)((view - start->tick) / (frame->tick - start->tick))};
             }
         } else if (peer->started) ++net->stats.extrapolated_inputs;
         peer->input.command_sequence = peer->applied_sequence;
@@ -915,15 +918,13 @@ const Game *network_render(Network *net, const Game *predicted, double now, floa
     }
     const StateFrame *latest = &net->states[net->completed_frame % (SRC_MAX_OLDPOS + 1)];
     double elapsed = net->render_time ? now - net->render_time : 0;
-    uint64_t delay = INTERPOLATION_TICKS;
-    double target = (double)latest->game.tick + (now - latest->receipt) * TICK_RATE;
+    double target = (double)latest->game.tick + (now - latest->receipt) * TICK_RATE - INTERPOLATION_TICKS;
     for (int i = 0; i <= SRC_MAX_OLDPOS; ++i) {
         const StateFrame *state = &net->states[i];
         if (!state->sequence || state->sequence + SRC_MAX_OLDPOS < net->completed_frame || state->map != net->map) continue;
-        target = fmin(target, (double)state->game.tick + (now - state->receipt) * TICK_RATE);
-        if (state->gap + 1 > delay) delay = state->gap + 1;
+        double reserve = fmax(INTERPOLATION_TICKS, (double)state->gap + 1);
+        target = fmin(target, (double)state->game.tick + (now - state->receipt) * TICK_RATE - reserve);
     }
-    target -= (double)delay;
     if (!net->render_time) net->view_tick = fmax(0, target);
     else {
         double error = target - net->view_tick;
