@@ -220,7 +220,7 @@ int main(void) {
     Vec3 hand_ray = add(shown_poses[1][15], v3(0, -.4f, .2f));
     Vec3 hand_start = v3(-40, hand_ray.y, hand_ray.z), hand_end = v3(40, hand_ray.y, hand_ray.z);
     Vec3 latest = combat_aim_target(&game, 0, hand_start, hand_end, NULL);
-    Vec3 shown = combat_aim_target(&game, 0, hand_start, hand_end, shown_poses);
+    Vec3 shown = combat_aim_target(&game, 0, hand_start, hand_end, (const Vec3 (*)[21])shown_poses);
     equal("latest discrete throw pose does not cover the displayed hand", latest.x, hand_end.x);
     check("crosshair selects the interpolated hand actually displayed", shown.x < 0 && shown.x > -2);
     game_free(&game);
