@@ -5,11 +5,11 @@
 #include <string.h>
 
 static const LayoutRoom arena_ring_rooms[] = {
-    {-350,0,0,160,180,0,ROCK}, {-250,-275,40,170,150,0,ROCK},
-    {50,-350,80,180,140,0,ROCK}, {325,-212.5,104,140,160,0,ROCK},
-    {362.5,87.5,40,150,170,0,ROCK}, {150,325,0,180,150,0,COURTYARD},
-    {-200,312.5,48,160,160,0,ROCK}, {0,12.5,120,120,120,0,ROCK},
-    {-87.5,-125,0,130,110,0,PIT}
+    {-350,0,0,104,116,0,ROCK}, {-250,-275,40,110,100,0,ROCK},
+    {50,-350,80,116,100,0,ROCK}, {325,-212.5,104,100,104,0,ROCK},
+    {362.5,87.5,40,100,110,0,ROCK}, {150,325,0,116,100,0,COURTYARD},
+    {-200,312.5,48,104,104,0,ROCK}, {0,12.5,120,100,100,0,ROCK},
+    {-87.5,-125,0,100,100,0,PIT}
 };
 static const LayoutLink arena_ring_links[] = {
     {0,1,NAV_WALK,56},{1,2,NAV_WALK,48},{2,3,NAV_WALK,48},
@@ -19,26 +19,26 @@ static const LayoutLink arena_ring_links[] = {
 };
 
 static const LayoutRoom arena2_trench_rooms[] = {
-    {-310,0,0,160,190,0,ROCK},{310,0,0,160,190,0,ROCK},
-    {0,-100,0,190,150,0,PIT},{-180,-210,56,140,150,0,ROCK},
-    {180,190,72,140,150,0,ROCK},{0,50,80,230,72,0,BRIDGE},
-    {180,-250,24,150,140,0,COURTYARD},{-150,210,24,150,140,0,COURTYARD},
-    {20,290,140,130,110,0,ROCK},{0,55,0,180,72,0,PIT}
+    {-420,-70,12,108,130,0,ROCK},{340,100,32,108,130,0,ROCK},
+    {-100,-100,-16,130,102,0,PIT},{-250,-340,100,96,102,0,ROCK},
+    {110,290,96,96,102,0,ROCK},{-20,110,116,230,72,0,BRIDGE},
+    {210,-270,52,102,96,0,COURTYARD},{-250,180,44,102,96,0,COURTYARD},
+    {-70,430,168,88,74,0,ROCK},{-20,110,-24,122,48,0,PIT}
 };
 static const LayoutLink arena2_trench_links[] = {
     {0,2,NAV_WALK,64},{2,1,NAV_WALK,64},{0,3,NAV_JET,52},
     {3,6,NAV_WALK,48},{6,1,NAV_WALK,52},{0,7,NAV_WALK,52},
-    {7,4,NAV_WALK,48},{4,1,NAV_JET,52},{3,5,NAV_WALK,42},
+    {7,4,NAV_WALK,48},{4,1,NAV_JET,52},{3,5,NAV_JET,42},
     {5,4,NAV_WALK,42},{2,5,NAV_JET,44},{7,8,NAV_JET,40},
-    {4,8,NAV_JET,48},{2,9,NAV_WALK,60},{9,7,NAV_WALK,52}
+    {4,8,NAV_JET,48},{2,9,NAV_WALK,60},{9,7,NAV_WALK,52},{7,5,NAV_JET,42}
 };
 
 static const LayoutRoom arena3_bridge_rooms[] = {
-    {-350,0,24,170,200,0,ROCK},{350,0,24,170,200,0,ROCK},
-    {-160,0,96,130,100,0,ROCK},{160,0,96,130,100,0,ROCK},
-    {0,0,96,220,64,0,BRIDGE},{-90,-200,0,200,160,0,PIT},
-    {110,200,0,200,160,0,PIT},{180,-220,44,130,150,0,ROCK},
-    {-180,220,44,130,150,0,ROCK},{0,360,148,140,110,0,ROCK}
+    {-350,0,24,110,130,0,ROCK},{350,0,24,110,130,0,ROCK},
+    {-160,0,96,100,100,0,ROCK},{160,0,96,100,100,0,ROCK},
+    {0,0,96,220,64,0,BRIDGE},{-90,-200,0,130,104,0,PIT},
+    {110,200,0,130,104,0,PIT},{180,-220,44,100,100,0,ROCK},
+    {-180,220,44,100,100,0,ROCK},{0,360,148,100,100,0,ROCK}
 };
 static const LayoutLink arena3_bridge_links[] = {
     {0,2,NAV_JET,48},{2,4,NAV_WALK,48},{4,3,NAV_WALK,48},{3,1,NAV_JET,48},
@@ -49,12 +49,12 @@ static const LayoutLink arena3_bridge_links[] = {
 };
 
 static const LayoutRoom aero_mesa_rooms[] = {
-    {-300,-260,0,180,160,0,COURTYARD},{300,260,0,180,160,0,COURTYARD},
-    {-240,-40,64,180,180,0,ROCK},{240,40,64,180,180,0,ROCK},
-    {-230,210,140,150,140,0,ROCK},{230,-210,140,150,140,0,ROCK},
-    {0,0,36,130,130,0,ROCK},{0,-280,0,180,120,72,HALL},
-    {0,280,0,180,120,72,HALL},{-430,150,40,120,150,0,ROCK},
-    {430,-150,40,120,150,0,ROCK}
+    {-300,-260,0,116,104,0,COURTYARD},{300,260,0,116,104,0,COURTYARD},
+    {-240,-40,64,116,116,0,ROCK},{240,40,64,116,116,0,ROCK},
+    {-230,210,140,128,100,0,ROCK},{230,-210,140,128,100,0,ROCK},
+    {0,0,36,100,100,0,ROCK},{0,-280,0,180,120,72,HALL},
+    {0,280,0,180,120,72,HALL},{-430,150,40,100,100,0,ROCK},
+    {430,-150,40,100,100,0,ROCK}
 };
 static const LayoutLink aero_mesa_links[] = {
     {0,7,NAV_WALK,64},{7,10,NAV_WALK,56},{10,3,NAV_WALK,56},
@@ -65,11 +65,11 @@ static const LayoutLink aero_mesa_links[] = {
 };
 
 static const LayoutRoom airpirates_lighthouse_rooms[] = {
-    {-360,-180,0,180,160,0,COURTYARD},{336,156,0,180,170,0,COURTYARD},
-    {-312,180,24,160,160,72,HALL},{-36,-216,52,180,140,0,ROCK},
-    {276,-192,84,160,150,0,ROCK},{24,156,116,150,150,0,ROCK},
-    {-192,408,168,130,130,0,ROCK},{48,432,224,100,110,64,HALL},
-    {330,396,152,140,150,0,ROCK},{-36,-10,0,150,140,0,PIT}
+    {-360,-180,0,116,104,0,COURTYARD},{336,156,0,116,110,0,COURTYARD},
+    {-312,180,24,160,160,72,HALL},{-36,-216,52,116,100,0,ROCK},
+    {276,-192,84,104,100,0,ROCK},{24,156,116,100,100,0,ROCK},
+    {-192,408,168,100,100,0,ROCK},{48,432,224,100,110,64,HALL},
+    {330,396,152,100,100,0,ROCK},{-36,-10,0,100,100,0,PIT}
 };
 static const LayoutLink airpirates_lighthouse_links[] = {
     {0,2,NAV_WALK,56},{0,3,NAV_WALK,52},{3,4,NAV_WALK,42},
@@ -81,9 +81,9 @@ static const LayoutLink airpirates_lighthouse_links[] = {
 
 static const LayoutRoom lagrange_woodland_rooms[] = {
     {-368,0,0,180,170,64,HALL},{368,0,0,180,170,64,HALL},
-    {-184,-253,12,170,160,0,COURTYARD},{161,-264.5,24,180,150,0,ROCK},
-    {184,253,12,170,160,0,COURTYARD},{-161,264.5,24,180,150,0,ROCK},
-    {0,0,0,180,110,0,PIT},{0,126.5,16,130,70,0,BRIDGE},
+    {-184,-253,12,110,104,0,COURTYARD},{161,-264.5,24,116,100,0,ROCK},
+    {184,253,12,110,104,0,COURTYARD},{-161,264.5,24,116,100,0,ROCK},
+    {0,0,0,116,100,0,PIT},{0,126.5,16,130,70,0,BRIDGE},
     {-69,-115,24,100,70,48,HALL}
 };
 static const LayoutLink lagrange_woodland_links[] = {
@@ -95,12 +95,12 @@ static const LayoutLink lagrange_woodland_links[] = {
 };
 
 static const LayoutRoom ash_fort_rooms[] = {
-    {-575,0,32,180,210,80,HALL},{575,0,32,180,210,80,HALL},
-    {-287.5,-187.5,64,160,150,0,ROCK},{287.5,187.5,64,160,150,0,ROCK},
-    {-287.5,187.5,64,160,150,0,ROCK},{287.5,-187.5,64,160,150,0,ROCK},
-    {0,0,0,190,180,0,PIT},{0,-325,116,150,120,0,BRIDGE},
-    {0,325,116,150,120,0,BRIDGE},{-162.5,0,128,100,100,0,ROCK},
-    {162.5,0,128,100,100,0,ROCK}
+    {-650,-100,40,180,210,80,HALL},{650,100,40,180,210,80,HALL},
+    {-340,-270,84,108,102,0,ROCK},{340,270,84,108,102,0,ROCK},
+    {-300,130,60,108,102,0,ROCK},{300,-130,60,108,102,0,ROCK},
+    {0,0,-24,130,122,0,PIT},{-60,-410,152,150,120,0,BRIDGE},
+    {60,410,152,150,120,0,BRIDGE},{-180,-30,160,68,68,0,ROCK},
+    {180,30,160,68,68,0,ROCK}
 };
 static const LayoutLink ash_fort_links[] = {
     {0,2,NAV_WALK,60},{0,4,NAV_WALK,60},{1,3,NAV_WALK,60},{1,5,NAV_WALK,60},
@@ -194,4 +194,13 @@ const Layout *world_layout(const char *name) {
     if (layout) return layout;
     fprintf(stderr,"No authored 3D layout for %s\n",name);
     abort();
+}
+
+const LayoutTerrain *world_terrain(const char *name)
+{
+    const LayoutTerrain *terrain=world_terrain_pilots(name);
+    if(!terrain)terrain=world_terrain_dm(name);
+    if(!terrain)terrain=world_terrain_team(name);
+    if(terrain)return terrain;
+    fprintf(stderr,"No authored terrain for %s\n",name);abort();
 }

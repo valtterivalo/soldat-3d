@@ -1,4 +1,5 @@
 #include "world.h"
+#include "world_layouts.h"
 #include "pose.h"
 #include "ragdoll.h"
 #include "generated_rules.h"
@@ -6,17 +7,25 @@
 #undef NDEBUG
 #include <assert.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+typedef struct { unsigned a,b,inside; } BoundaryEdge;
+static int boundary_compare(const void *left,const void *right)
+{
+    const BoundaryEdge *a=left,*b=right;
+    return a->a!=b->a ? (a->a<b->a ? -1 : 1) : a->b<b->b ? -1 : a->b>b->b;
+}
 
 int main(void)
 {
     world_init();poses_init();ragdolls_init();
     assert(world_jet_fuel==152);
     assert(world_background[0][0]==36 && world_background[0][1]==112 && world_background[0][2]==187);
-    Vec3 sample=v3(world_bounds.min.x+38,world_bounds.min.y,(world_bounds.min.z+world_bounds.max.z)*.5f+17);
+    Vec3 sample=world_spawns[0];
     Vec3 from=add(sample,v3(0,8,0)),to=sub(sample,v3(0,8,0)),point=v3(0,0,0);
     WorldHit floor=world_trace(from,to,point);
-    assert(floor.box>=0 && floor.normal.y>.99f);
+    assert(floor.box>=0 && floor.normal.y>.5f);
     WorldQuery player={WORLD_TRACE_ACTOR,0,WORLD_NO_FLAG};
     WorldQuery bullet={WORLD_TRACE_BULLET,0,WORLD_NO_FLAG};
     WorldQuery item={WORLD_TRACE_ITEM,0,WORLD_NO_FLAG};
@@ -100,8 +109,7 @@ int main(void)
             }
             assert(count>before);
         }
-        Vec3 center=scale(add(world_bounds.min,world_bounds.max),.5f);
-        center.y=world_bounds.max.y-140;
+        Vec3 center=add(world_spawns[0],v3(0,24,0));
         float span=length(sub(world_bounds.max,world_bounds.min))*2;
         assert(world_pose_clear(center,STANDING));
         const Vec3 directions[]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
@@ -110,18 +118,43 @@ int main(void)
             if(hit.box<0)fprintf(stderr,"Open enclosure %s direction%u from %.2f,%.2f,%.2f\n",world_map_names[map],direction,center.x,center.y,center.z);
             assert(hit.box>=0);++enclosure_rays;
         }
+        const LayoutTerrain *terrain=world_terrain(world_map_names[map]);
+        size_t edge_count=3*terrain->triangle_count;
+        BoundaryEdge *edges=malloc(edge_count*sizeof(*edges));assert(edges);
+        for(size_t triangle=0;triangle<terrain->triangle_count;++triangle) {
+            LayoutTerrainTriangle face=terrain->triangles[triangle];unsigned ids[]={face.a,face.b,face.c};
+            for(unsigned edge=0;edge<3;++edge) {
+                unsigned a=ids[edge],b=ids[(edge+1)%3];if(a>b){unsigned swap=a;a=b;b=swap;}
+                edges[3*triangle+edge]=(BoundaryEdge){a,b,ids[(edge+2)%3]};
+            }
+        }
+        qsort(edges,edge_count,sizeof(*edges),boundary_compare);
+        for(size_t edge=0;edge<edge_count;) {
+            size_t next=edge+1;while(next<edge_count && edges[next].a==edges[edge].a && edges[next].b==edges[edge].b)++next;
+            assert(next-edge<=2);
+            if(next-edge==1) {
+                LayoutTerrainVertex a=terrain->vertices[edges[edge].a],b=terrain->vertices[edges[edge].b],c=terrain->vertices[edges[edge].inside];
+                Vec3 middle=v3((a.x+b.x)*.5f,(a.y+b.y)*.5f+7,(a.z+b.z)*.5f);
+                Vec3 outside=v3(b.z-a.z,0,a.x-b.x);
+                if(dot(outside,v3(c.x-a.x,0,c.z-a.z))>0)outside=scale(outside,-1);
+                outside=scale(outside,1/length(outside));
+                WorldHit bank=world_trace(middle,add(middle,scale(outside,span)),v3(0,0,0));
+                if(bank.box<0)fprintf(stderr,"Open terrain edge %s %u-%u at%g,%g,%g\n",world_map_names[map],edges[edge].a,edges[edge].b,middle.x,middle.y,middle.z);
+                assert(bank.box>=0);
+                Vec3 interior=v3((a.x+b.x+c.x)/3,(a.y+b.y+c.y)/3+14,(a.z+b.z+c.z)/3);
+                WorldHit sky=world_trace(interior,add(interior,v3(0,span,0)),v3(0,0,0));
+                if(sky.box<0)fprintf(stderr,"Open sky edge %s %u-%u from%g,%g,%g\n",world_map_names[map],edges[edge].a,edges[edge].b,interior.x,interior.y,interior.z);
+                assert(sky.box>=0);
+                enclosure_rays+=2;
+            }
+            edge=next;
+        }
+        free(edges);
         for(size_t i=0;i<world_solid_count;++i) {
             const WorldSolid *solid=&world_solids[i];
-            Vec3 centroid=v3(0,0,0);float highest=-INFINITY;
+            Vec3 centroid=v3(0,0,0);
             for(unsigned k=0;k<solid->vertex_count;++k) {
                 centroid=add(centroid,scale(solid->vertices[k],1/(float)solid->vertex_count));
-                highest=fmaxf(highest,solid->vertices[k].y);
-            }
-            if(solid->texture==WORLD_TERRAIN && highest>center.y)for(unsigned k=0;k<solid->vertex_count;++k) {
-                Vec3 direction=sub(solid->vertices[k],center);direction.y=0;
-                Vec3 outside=add(center,scale(direction,span/length(direction)));
-                WorldHit wall=world_trace(center,outside,v3(3,7,3));
-                assert(wall.box>=0 && world_solids[wall.box].texture==WORLD_TERRAIN);++enclosure_rays;
             }
             for(unsigned f=0;f<solid->face_count;++f) {
                 Vec3 a=solid->vertices[solid->faces[f][0]],n=v3(0,0,0);
@@ -129,10 +162,15 @@ int main(void)
                     Vec3 b=sub(solid->vertices[solid->faces[f][k]],a),c=sub(solid->vertices[solid->faces[f][k+1]],a);
                     n=add(n,v3(b.y*c.z-b.z*c.y,b.z*c.x-b.x*c.z,b.x*c.y-b.y*c.x));
                 }
+                if(!(length(n)>0))fprintf(stderr,"Degenerate %s solid%zu face%u vertices%u\n",world_map_names[map],i,f,solid->vertex_count);
                 assert(length(n)>0);n=scale(n,1/length(n));
                 if(dot(n,sub(centroid,a))>0)n=scale(n,-1);
                 for(unsigned k=3;k<solid->face_size[f];++k)assert(fabsf(dot(n,sub(solid->vertices[solid->faces[f][k]],a)))<.01f);
-                for(unsigned k=0;k<solid->vertex_count;++k)assert(dot(n,sub(solid->vertices[k],a))<.01f);
+                for(unsigned k=0;k<solid->vertex_count;++k) {
+                    float distance=dot(n,sub(solid->vertices[k],a));
+                    if(distance>=.01f)fprintf(stderr,"Nonconvex %s solid%zu face%u vertex%u distance%g at%g,%g,%g\n",world_map_names[map],i,f,k,distance,solid->vertices[k].x,solid->vertices[k].y,solid->vertices[k].z);
+                    assert(distance<.01f);
+                }
             }
         }
         actor=(Actor){.previous=center,.position=add(center,v3(span,0,span)),.velocity={12,0,12},.pose=STANDING};

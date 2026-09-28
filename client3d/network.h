@@ -5,7 +5,7 @@
 
 typedef struct Network Network;
 typedef enum { NET_CONNECTING, NET_CONNECTED, NET_DISCONNECTED, NET_REJECTED } NetStatus;
-enum { NETWORK_PROTOCOL_VERSION = 7, NETWORK_PACKET_HEADER = 57, NETWORK_PACKET_DATA = 1200 - NETWORK_PACKET_HEADER };
+enum { NETWORK_PROTOCOL_VERSION = 8, NETWORK_PACKET_HEADER = 57, NETWORK_PACKET_DATA = 1200 - NETWORK_PACKET_HEADER };
 Network *network_host(unsigned short port, int local_actor, Game *game);
 Network *network_join(const char *host, unsigned short port, const char *name);
 void network_close(Network *network);

@@ -21,7 +21,7 @@ static Game encounter(WeaponId primary,WeaponId secondary,float minimum,float ma
     for(size_t a=0;a<world_nav_node_count && !found;++a)for(size_t b=0;b<world_nav_node_count && !found;++b) {
         Vec3 x=world_nav_nodes[a].position,y=world_nav_nodes[b].position;
         float distance=length(sub(x,y));
-        if(distance<minimum || distance>maximum || fabsf(x.y-y.y)>1)continue;
+        if(distance<minimum || distance>maximum || (primary!=BARRETT && fabsf(x.y-y.y)>1))continue;
         if(world_trace(add(x,v3(0,10,0)),add(y,v3(0,10,0)),v3(0,0,0)).box>=0)continue;
         Vec3 side=v3(-(y.z-x.z)/distance,0,(y.x-x.x)/distance);
         if(primary==BARRETT && (world_trace(add(y,v3(0,7,0)),add(add(y,v3(0,7,0)),scale(side,35)),v3(3,6.8f,3)).box>=0 ||

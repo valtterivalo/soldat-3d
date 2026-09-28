@@ -418,6 +418,7 @@ void map_visuals_init(void)
         Vec3 center=v3(0,0,0);
         for(unsigned v=0;v<solid->vertex_count;++v)center=add(center,scale(solid->vertices[v],1/(float)solid->vertex_count));
         for (unsigned face=0;face<solid->face_count;++face) {
+            if(!(solid->visible_faces&(1u<<face)))continue;
             MapVertex vertices[8];
             Vec3 a=solid->vertices[solid->faces[face][0]];
             Vec3 edge=sub(solid->vertices[solid->faces[face][1]],a);
@@ -602,6 +603,7 @@ void map_visuals_free(void)
     for (size_t i=0;i<world_scenery_count;++i) {
         if (art[i].kind!=SCENERY_LIGHT) UnloadModel(props[i]);
         UnloadTexture(art[i].texture);
+        UnloadImageColors(art[i].pixels);
     }
     free(props);
     free(art);

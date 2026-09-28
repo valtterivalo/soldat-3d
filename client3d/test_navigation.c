@@ -8,17 +8,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-int main(void) {
+int main(int argc,char **argv) {
+    if(argc>2)return EXIT_FAILURE;
+    size_t first=0,last=world_map_count;
+    if(argc==2){first=world_map_index(argv[1]);if(first==SIZE_MAX)return EXIT_FAILURE;last=first+1;}
     poses_init();
     ragdolls_init();
     size_t passed = 0, failed = 0, blocked = 0, travel_counts[NAV_JUMP + 1] = {0};
     uint64_t simulated = 0;
     unsigned longest = 0;
-    for (size_t map = 0; map < world_map_count; ++map) {
+    for (size_t map = first; map < last; ++map) {
         world_load(map);
         NavNode *nodes = world_nav_nodes;
         NavLink *links = world_nav_links;
         size_t node_count = world_nav_node_count, link_count = world_nav_link_count;
+        Game game;
+        game_init(&game, 0x726f7574u, MODE_DEATHMATCH);
+        for (int i = 2; i < ACTOR_COUNT; ++i) game.actors[i].life = INACTIVE;
+        Actor initial = game.actors[0];
         for (size_t link = 0; link < link_count; ++link) {
             NavLink edge = links[link];
             unsigned states = world_gate_count ? 2 * TEAM_SPECTATOR : 1;
@@ -29,9 +36,9 @@ int main(void) {
                     ++blocked;
                     continue;
                 }
-                Game game;
-                game_init(&game, 0x726f7574u, MODE_DEATHMATCH);
-                for (int i = 2; i < ACTOR_COUNT; ++i) game.actors[i].life = INACTIVE;
+                game.actors[0] = initial;
+                game.bots[0] = (BotMemory){0};
+                game.tick = 0;
                 Actor *actor = &game.actors[0];
                 actor->position = actor->previous = nodes[edge.from].position;
                 actor->velocity = actor->force = v3(0, 0, 0);
@@ -109,12 +116,12 @@ int main(void) {
                 world_nav_node_count = node_count;
                 world_nav_links = links;
                 world_nav_link_count = link_count;
-                game_free(&game);
             }
         }
+        game_free(&game);
     }
     printf("Navigation: %zu maps, %zu passed, %zu failed, %zu gate rejections, WALK%zu JET%zu DROP%zu JUMP%zu, "
-        "%llu movement ticks, longest%u ticks\n", world_map_count, passed, failed, blocked,
+        "%llu movement ticks, longest%u ticks\n", last-first, passed, failed, blocked,
         travel_counts[NAV_WALK], travel_counts[NAV_JET], travel_counts[NAV_DROP], travel_counts[NAV_JUMP],
         (unsigned long long)simulated, longest);
     ragdolls_free();

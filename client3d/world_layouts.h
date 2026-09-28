@@ -21,6 +21,15 @@ typedef struct {
     unsigned alpha_room,bravo_room,neutral_room;
 } Layout;
 
+typedef struct { float x,z,y,crest; } LayoutTerrainVertex;
+typedef struct { unsigned a,b,c; } LayoutTerrainTriangle;
+typedef struct {
+    const LayoutTerrainVertex *vertices;
+    size_t vertex_count;
+    const LayoutTerrainTriangle *triangles;
+    size_t triangle_count;
+} LayoutTerrain;
+
 typedef struct {
     unsigned room;
     float x,z,width,depth,height;
@@ -31,5 +40,9 @@ typedef struct {
 const Layout *world_layout(const char *name);
 const Layout *world_layout_dm(const char *name);
 const Layout *world_layout_team(const char *name);
+const LayoutTerrain *world_terrain(const char *name);
+const LayoutTerrain *world_terrain_pilots(const char *name);
+const LayoutTerrain *world_terrain_dm(const char *name);
+const LayoutTerrain *world_terrain_team(const char *name);
 
 #endif

@@ -114,6 +114,10 @@ int main(void) {
             if (material->height) continue;
             const LayoutRoom *room=&layout->rooms[material->room];
             Vec3 feet=v3(room->x+material->x,room->y+.05f,room->z+material->z);
+            Vec3 from=add(feet,v3(0,16,0)),to=v3(feet.x,world_bounds.min.y-8,feet.z);
+            WorldHit support=world_trace(from,to,v3(3,0,3));
+            check(support.box>=0,"source pad has physical terrain support");
+            feet=add(add(from,scale(sub(to,from),support.fraction)),v3(0,.05f,0));
             Actor standing={.position=feet,.pose=STANDING};
             unsigned type=world_contact_type(&standing);
             int clear=world_pose_clear(feet,STANDING);

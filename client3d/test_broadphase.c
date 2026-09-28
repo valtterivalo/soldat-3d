@@ -8,7 +8,7 @@
 #include <string.h>
 
 typedef struct { Vec3 normal;float distance; } TestPlane;
-typedef struct { TestPlane planes[16];Vec3 low,high;unsigned count; } TestHull;
+typedef struct { TestPlane planes[sizeof(((WorldSolid *)0)->face_size)/sizeof(unsigned)+6+6*sizeof(((WorldSolid *)0)->faces)/sizeof(unsigned)];Vec3 low,high;unsigned count; } TestHull;
 
 static WorldHit exhaustive(const TestHull *hulls,Vec3 start,Vec3 end,Vec3 extents,WorldQuery query)
 {
@@ -29,7 +29,8 @@ static WorldHit exhaustive(const TestHull *hulls,Vec3 start,Vec3 end,Vec3 extent
             fminf(start.y,end.y)>hull->high.y+extents.y || fmaxf(start.y,end.y)<hull->low.y-extents.y ||
             fminf(start.z,end.z)>hull->high.z+extents.z || fmaxf(start.z,end.z)<hull->low.z-extents.z)continue;
         float enter=-FLT_MAX,leave=1,nearest=-FLT_MAX;int inside=1;Vec3 normal={0},nearest_normal={0};
-        for(unsigned p=0;p<hull->count;++p) {
+        unsigned plane_count=extents.x==0 && extents.y==0 && extents.z==0 ? solid->face_count+6 : hull->count;
+        for(unsigned p=0;p<plane_count;++p) {
             TestPlane plane=hull->planes[p];
             float distance=plane.distance+fabsf(plane.normal.x)*extents.x+fabsf(plane.normal.y)*extents.y+fabsf(plane.normal.z)*extents.z;
             float from=dot(plane.normal,start)-distance,to=dot(plane.normal,end)-distance;
@@ -78,6 +79,26 @@ int main(void)
             }
             const TestPlane bounds[]={{{-1,0,0},-hull->low.x},{{1,0,0},hull->high.x},{{0,-1,0},-hull->low.y},{{0,1,0},hull->high.y},{{0,0,-1},-hull->low.z},{{0,0,1},hull->high.z}};
             memcpy(hull->planes+hull->count,bounds,sizeof(bounds));hull->count+=6;
+            unsigned char edges[16][16]={0};
+            for(unsigned face=0;face<solid->face_count;++face)for(unsigned edge=0;edge<solid->face_size[face];++edge) {
+                unsigned a=solid->faces[face][edge],b=solid->faces[face][(edge+1)%solid->face_size[face]];
+                if(edges[a][b])continue;
+                edges[a][b]=edges[b][a]=1;
+                Vec3 delta=sub(solid->vertices[b],solid->vertices[a]);
+                Vec3 axes[]={v3(0,delta.z,-delta.y),v3(-delta.z,0,delta.x),v3(delta.y,-delta.x,0)};
+                for(unsigned axis=0;axis<3;++axis) {
+                    float magnitude=length(axes[axis]);if(magnitude==0)continue;
+                    Vec3 normal=scale(axes[axis],1/magnitude);
+                    for(unsigned sign=0;sign<2;++sign,normal=scale(normal,-1)) {
+                        unsigned existing=0;
+                        for(;existing<hull->count;++existing)if(normal.x==hull->planes[existing].normal.x && normal.y==hull->planes[existing].normal.y && normal.z==hull->planes[existing].normal.z)break;
+                        if(existing<hull->count)continue;
+                        float distance=-FLT_MAX;
+                        for(unsigned v=0;v<solid->vertex_count;++v)distance=fmaxf(distance,dot(normal,solid->vertices[v]));
+                        hull->planes[hull->count++]=(TestPlane){normal,distance};
+                    }
+                }
+            }
         }
         size_t cases=world_solid_count*2+128;
         for(size_t n=0;n<cases;++n) {

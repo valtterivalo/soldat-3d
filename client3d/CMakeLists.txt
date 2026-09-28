@@ -11,7 +11,7 @@ include(CTest)
 include(weapons.cmake)
 soldat_generate_weapons("${CMAKE_CURRENT_BINARY_DIR}/generated")
 
-add_library(soldat_sim STATIC game.c bot.c bot_navigation.c showcase.c movement.c combat.c camera.c world.c world_layouts.c world_layouts_dm.c world_layouts_team.c pose.c ragdoll.c pickups.c objectives.c snapshot.c replica.c network.c lobby.c
+add_library(soldat_sim STATIC game.c bot.c bot_navigation.c showcase.c movement.c combat.c camera.c world.c world_layouts.c world_layouts_dm.c world_layouts_team.c world_terrain_dm.c world_terrain_team.c world_terrain_pilots.c pose.c ragdoll.c pickups.c objectives.c snapshot.c replica.c network.c lobby.c
     "${CMAKE_CURRENT_BINARY_DIR}/generated/weapons_generated.c")
 target_include_directories(soldat_sim PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_include_directories(soldat_sim PRIVATE "${ZSTD_INCLUDE_DIR}")
@@ -23,12 +23,13 @@ if(NOT WIN32)
 endif()
 
 if(BUILD_TESTING)
-    foreach(suite IN ITEMS movement combat camera pose world broadphase navigation bots bot_navigation game spawns ragdoll pickups snapshot replica network objectives lobby materials)
+    foreach(suite IN ITEMS movement combat camera pose world broadphase collision navigation bots bot_navigation game spawns ragdoll pickups snapshot replica network objectives lobby materials)
         add_executable(test_${suite} test_${suite}.c)
         target_link_libraries(test_${suite} PRIVATE soldat_sim)
         target_compile_options(test_${suite} PRIVATE -Wall -Wextra -Wpedantic -Werror)
         add_test(NAME ${suite} COMMAND test_${suite})
     endforeach()
+    target_compile_definitions(test_collision PRIVATE SOLDAT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/assets")
 endif()
 
 add_executable(soldat3d-server server.c)

@@ -42,8 +42,27 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
     }
     if (actor->nav_edge >= 0 && world_gate_count &&
         !world_nav_link_allows(&world_nav_links[actor->nav_edge], movement_query)) actor->nav_edge = -1;
+    if (actor->nav_edge >= 0 && actor->contact == GROUNDED) {
+        const NavLink *committed = &world_nav_links[actor->nav_edge];
+        if (committed->mode == NAV_WALK) {
+            Vec3 start = world_nav_nodes[committed->from].position;
+            Vec3 route = sub(world_nav_nodes[committed->to].position, start);
+            float along = dot(sub(actor->position, start), route) / dot(route, route);
+            Vec3 projection = add(start, scale(route, fmaxf(0, fminf(1, along))));
+            if (projection.y > actor->position.y + actor_height(actor->pose)) {
+                Vec3 above = add(projection, v3(0, actor_height(STANDING), 0));
+                Vec3 below = v3(projection.x, world_bounds.min.y - 8, projection.z);
+                WorldHit floor = world_trace_for(above, below, v3(3, 0, 3), movement_query);
+                if (floor.box >= 0 && floor.normal.y > .5f) {
+                    Vec3 feet = add(add(above, scale(sub(below, above), floor.fraction)), v3(0, .05f, 0));
+                    WorldHit recover = world_trace_for(center, add(feet, v3(0, 7, 0)),
+                        v3(3, 6.8f, 3), movement_query);
+                    if (recover.box >= 0 && recover.normal.y < -.5f) actor->nav_edge = -1;
+                }
+            }
+        }
+    }
     if (actor->nav_edge >= 0) source = world_nav_links[actor->nav_edge].from;
-    float lowest = world_bounds.min.y;
     for (size_t node = 0; node < world_nav_node_count; ++node) {
         if (world_gate_count && !world_nav_link_allows(
             &(NavLink){.from=(int)node,.to=(int)node,.mode=NAV_WALK},movement_query)) continue;
@@ -78,27 +97,40 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
     if (actor->nav_edge < 0 && source != goal && !local_ground &&
         !(intent == BOT_HOLD && actor->contact == GROUNDED)) {
         float costs[world_nav_node_count];
-        int next[world_nav_node_count];
-        unsigned char visited[world_nav_node_count];
+        int next[world_nav_node_count], first[world_nav_node_count], incoming[world_nav_link_count];
+        int heap[world_nav_node_count], positions[world_nav_node_count];
         for (size_t node = 0; node < world_nav_node_count; ++node) {
             costs[node] = (int)node == goal ? 0 : INFINITY;
             next[node] = -1;
-            visited[node] = 0;
+            first[node] = positions[node] = -1;
         }
-        for (size_t iteration = 0; iteration < world_nav_node_count; ++iteration) {
-            int closest = -1;
-            float cheapest = INFINITY;
-            for (size_t node = 0; node < world_nav_node_count; ++node) {
-                if (!visited[node] && costs[node] < cheapest) {
-                    closest = (int)node;
-                    cheapest = costs[node];
+        for(size_t link=world_nav_link_count;link-- >0;) {
+            int destination=world_nav_links[link].to;
+            incoming[link]=first[destination];first[destination]=(int)link;
+        }
+        size_t queued=1;
+        heap[0]=goal;positions[goal]=0;
+        while(queued) {
+            int closest=heap[0];
+            if(closest==source)break;
+            float cheapest=costs[closest];
+            positions[closest]=-2;
+            int replacement=heap[--queued];
+            if(queued) {
+                size_t parent=0;
+                while(parent*2+1<queued) {
+                    size_t child=parent*2+1;
+                    if(child+1<queued && (costs[heap[child+1]]<costs[heap[child]] ||
+                        (costs[heap[child+1]]==costs[heap[child]] && heap[child+1]<heap[child])))++child;
+                    if(costs[replacement]<costs[heap[child]] ||
+                        (costs[replacement]==costs[heap[child]] && replacement<heap[child]))break;
+                    heap[parent]=heap[child];positions[heap[parent]]=(int)parent;parent=child;
                 }
+                heap[parent]=replacement;positions[replacement]=(int)parent;
             }
-            if (closest < 0 || closest == source) break;
-            visited[closest] = 1;
-            for (size_t link = 0; link < world_nav_link_count; ++link) {
+            for(int link=first[closest];link>=0;link=incoming[link]) {
                 const NavLink *edge = &world_nav_links[link];
-                if (edge->to != closest || edge->fuel > actor->fuel_capacity) continue;
+                if (edge->fuel > actor->fuel_capacity) continue;
                 float wait = fmaxf(0, (float)(edge->fuel - actor->fuel));
                 float preference = 1 + .08f * (float)((edge->from * 3 + index) % 5);
                 float cost = cheapest + edge->cost * preference + wait;
@@ -106,6 +138,15 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
                     if (world_gate_count && !world_nav_link_allows(edge,movement_query)) continue;
                     costs[edge->from] = cost;
                     next[edge->from] = (int)link;
+                    int position=positions[edge->from];
+                    assert(position!=-2);
+                    if(position<0)position=(int)queued++;
+                    while(position>0) {
+                        int parent=(position-1)/2,node=heap[parent];
+                        if(costs[node]<cost || (costs[node]==cost && node<edge->from))break;
+                        heap[position]=node;positions[node]=position;position=parent;
+                    }
+                    heap[position]=edge->from;positions[edge->from]=position;
                 }
             }
         }
@@ -126,13 +167,19 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
         waypoint = approach;
     if (local_ground) waypoint = approach;
     if (intent == BOT_HOLD && actor->contact == GROUNDED) waypoint = actor->position;
+    Vec3 destination = waypoint;
     WorldHit corridor = world_trace_for(center, add(waypoint, v3(0, 7, 0)), v3(3, 6.8f, 3), movement_query);
     WorldHit planned_corridor = world_trace_for(add(world_nav_nodes[source].position, v3(0, 7, 0)),
         add(waypoint, v3(0, 7, 0)), v3(3, 6.8f, 3), movement_query);
-    if (edge && edge->mode == NAV_WALK && corridor.box >= 0 && corridor.normal.y < .5f &&
+    int route_recovery = edge && edge->mode == NAV_WALK && corridor.box >= 0 && corridor.normal.y < .5f &&
         (planned_corridor.box < 0 || planned_corridor.normal.y >= .5f) &&
-        length(sub(actor->position, world_nav_nodes[source].position)) > 12)
-        waypoint = world_nav_nodes[source].position;
+        length(sub(actor->position, world_nav_nodes[source].position)) > 12;
+    if (route_recovery) {
+        Vec3 origin = world_nav_nodes[source].position;
+        Vec3 route = sub(waypoint, origin);
+        float along = dot(sub(actor->position, origin), route) / dot(route, route);
+        waypoint = add(origin, scale(route, fmaxf(0, fminf(1, along))));
+    }
     Vec3 travel = sub(waypoint, actor->position);
     float distance = sqrtf(travel.x * travel.x + travel.z * travel.z);
     int flight = edge && edge->mode != NAV_WALK;
@@ -153,13 +200,13 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
     float ground_damping = SRC_EDAMPING * SRC_SURFACECOEFX;
     float run_speed = SRC_RUNSPEED * ground_damping / (1 - ground_damping);
     Vec3 steer = v3(travel.x, 0, travel.z);
-    if (flight && actor->contact == AIRBORNE) {
+    if (actor->contact == AIRBORNE) {
         Vec3 velocity = v3(actor->velocity.x, 0, actor->velocity.z);
         steer = sub(steer, scale(velocity, length(velocity) / (2 * SRC_FLYSPEED)));
     }
     float steer_distance = length(steer);
     Vec3 desired = v3(0, 0, 0);
-    if (steer_distance > 1) {
+    if (steer_distance > (route_recovery ? 0 : 1)) {
         float speed = flight ? 2.8f : run_speed;
         if (!flight && actor->contact == AIRBORNE) speed = fmaxf(speed, length(planar_velocity));
         desired = scale(steer, fminf(speed, steer_distance * .14f) / steer_distance);
@@ -242,37 +289,65 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
     if (!flight && actor->contact == GROUNDED) {
         movement = add(scale(desired, (1 - ground_damping) / ground_damping),
             scale(movement, 1 - ground_damping));
+        WorldHit support=world_trace_for(add(actor->position,v3(0,1,0)),sub(actor->position,v3(0,1,0)),
+            v3(3,0,3),movement_query);
+        if(support.box>=0 && support.normal.y>.5f) {
+            Vec3 normal=support.normal;
+            float tangent=(normal.x*movement.x+normal.z*movement.z)/(normal.y*normal.y);
+            float gravity=(SRC_RUNSPEEDUP-SRC_GRAV)/normal.y;
+            Vec3 along=add(movement,scale(v3(normal.x,0,normal.z),tangent));
+            Vec3 hold=scale(v3(normal.x,0,normal.z),gravity);
+            movement=add(along,hold);
+            if(dot(movement,movement)>SRC_RUNSPEED*SRC_RUNSPEED) {
+                float a=dot(along,along),b=2*dot(along,hold);
+                float c=dot(hold,hold)-SRC_RUNSPEED*SRC_RUNSPEED;
+                float fraction=(-b+sqrtf(b*b-4*a*c))/(2*a);
+                movement=add(scale(along,fraction),hold);
+            }
+        }
         movement = scale(movement, 1 / SRC_RUNSPEED);
-        if (distance < 2 && !threat && !memory->nav_neighbors) movement = v3(0, 0, 0);
+        if (length(sub(destination, actor->position)) < 2 && !threat && !memory->nav_neighbors) movement = v3(0, 0, 0);
     }
     float magnitude = length(movement);
     if (magnitude > 1) movement = scale(movement, 1 / magnitude);
     input->forward = movement.x * sinf(input->yaw) + movement.z * cosf(input->yaw);
     input->right = -movement.x * cosf(input->yaw) + movement.z * sinf(input->yaw);
-    Vec3 ahead = distance > 1 ? scale(v3(travel.x, 0, travel.z), 18 / distance) : v3(0, 0, 0);
-    WorldHit wall = world_trace_for(center, add(center, ahead), v3(3, 6, 3), movement_query);
     int jumping = (actor->animation == MOVE_SIDEJUMP && actor->animation_tick <= 10) ||
         (actor->animation == MOVE_JUMP && actor->animation_tick <= 14);
     int launch = edge && actor->nav_phase == BOT_ASCEND &&
         actor->velocity.x*actor->velocity.x+actor->velocity.z*actor->velocity.z < .1f &&
         (edge->mode == NAV_JUMP || (edge->mode == NAV_JET && actor->fuel >= edge->fuel));
-    int step_over = wall.box >= 0 && wall.normal.y < .5f && (!edge || edge->mode == NAV_WALK);
+    int step_over = 0;
+    if (!edge || edge->mode == NAV_WALK) {
+        Vec3 ahead = distance > 1 ? scale(v3(travel.x, 0, travel.z), fminf(18, distance) / distance) : v3(0, 0, 0);
+        WorldHit wall = world_trace_for(center, add(center, ahead), v3(3, 6, 3), movement_query);
+        step_over = wall.box >= 0 && wall.normal.y < .5f;
+    }
     float hop_distance = (run_speed + 3.5f * SRC_JUMPDIRSPEED) * SRC_SIDEJUMP_FRAMES;
     float impulse = 7 * SRC_JUMPDIRSPEED / 1.2f;
     float hop_height = impulse * impulse / (2 * SRC_GRAV);
     int bunny = intent != BOT_HOLD && !flight && actor->contact == GROUNDED &&
-        actor->pose == STANDING && actor->position.y < lowest + 1 && fabsf(travel.y) < 1 &&
+        actor->pose == STANDING && fabsf(travel.y) < 1 &&
         distance > hop_distance && length(planar_velocity) > run_speed * .75f &&
         world_trace_for(center, add(center, v3(0, hop_height, 0)), v3(3, 7, 3), movement_query).box < 0 &&
         world_trace_for(add(center, v3(0, hop_height, 0)),
             add(add(center, v3(0, hop_height, 0)), scale(v3(travel.x, 0, travel.z), hop_distance / distance)),
             v3(3, 7, 3), movement_query).box < 0;
+    if (bunny) {
+        Vec3 landing = add(center, scale(v3(travel.x, 0, travel.z), hop_distance / distance));
+        WorldHit ground = world_trace_for(add(landing, v3(0, 1, 0)), sub(landing, v3(0, 1, 0)),
+            v3(3, 7, 3), movement_query);
+        bunny = ground.box >= 0 && ground.normal.y > .5f;
+        if (bunny) {
+            unsigned type = world_solids[ground.box].poly_type;
+            bunny = type != 5 && type != 6 && type != 18 && type != 19;
+        }
+    }
     if (jumping || (actor->contact == GROUNDED && (launch || step_over || bunny)))
         input->held |= INPUT_JUMP;
     else if (actor->contact == AIRBORNE && actor->fuel > 0 &&
         (!edge || edge->mode != NAV_JUMP) &&
-        ((flight && actor->nav_phase != BOT_LAND) || (!flight && waypoint.y > lowest + 6) ||
-            waypoint.y > actor->position.y + 4) &&
+        ((flight && actor->nav_phase != BOT_LAND) || waypoint.y > actor->position.y + 4) &&
         actor->position.y + actor->velocity.y * 10 < flight_height)
         input->held |= INPUT_JETS;
     if (!flight && (bunny || (jumping && actor->animation == MOVE_SIDEJUMP)) && distance > 1) {

@@ -26,7 +26,7 @@
 #include <strings.h>
 
 typedef enum { MENU, PLAYING, BROWSER } Screen;
-typedef enum { INTERACTIVE, CAPTURE_MENU, CAPTURE_SOLDIER, CAPTURE_MAP } ViewMode;
+typedef enum { INTERACTIVE, CAPTURE_MENU, CAPTURE_SOLDIER, CAPTURE_MAP, CAPTURE_PLAN } ViewMode;
 typedef enum { JOIN_IDLE, JOIN_SELECTED } JoinState;
 typedef enum { OFFLINE, HOST, CLIENT } Session;
 typedef enum { PRESENT_IMMEDIATE, PRESENT_VSYNC } FrameSync;
@@ -141,6 +141,10 @@ static Camera3D render_camera(ShoulderView view) {
         .projection=CAMERA_PERSPECTIVE};
 }
 
+static int map_capture(ViewMode mode) {
+    return mode==CAPTURE_MAP || mode==CAPTURE_PLAN;
+}
+
 int main(int argc,char **argv) {
     int demo_frames=0,benchmark_frames=0,muted=0,bots=6,bonuses=0;
     FrameSync sync=PRESENT_IMMEDIATE;
@@ -203,13 +207,14 @@ int main(int argc,char **argv) {
         else if (!strcmp(argv[i],"--mute")) muted=1;
         else if (!strcmp(argv[i],"--vsync")) sync=PRESENT_VSYNC;
         else if (!strcmp(argv[i],"--menu-frame")) view_mode=CAPTURE_MENU;
+        else if (!strcmp(argv[i],"--map-plan")) view_mode=CAPTURE_PLAN;
         else if ((!strcmp(argv[i],"--asset-view") || !strcmp(argv[i],"--map-view")) && i+1<argc) {
             view_mode=!strcmp(argv[i],"--asset-view") ? CAPTURE_SOLDIER : CAPTURE_MAP;
             char *end;
             view_angle=strtof(argv[++i],&end)*DEG2RAD;
             if (end==argv[i] || *end) {fprintf(stderr,"Invalid view angle\n");return 2;}
         } else {
-            fprintf(stderr,"Usage: %s [--host | --join hostname | --browse | --quickjoin] [--lobby hostname] [--lobby-port 23074] [--server-name name] [--port 23073] [--name name] [--team auto|alpha|bravo|charlie|delta|spectator] [--map Arena2] [--list-maps] [--bots 0..31] [--bonuses 0..5] [--mode deathmatch|pointmatch|teammatch|ctf|rambo|inf|htf] [--score-limit N] [--time-limit minutes] [--friendly-fire] [--demo-frames N] [--benchmark N] [--vsync] [--screenshot path.png] [--menu-frame] [--asset-view degrees] [--map-view degrees] [--mute]\n",argv[0]);
+            fprintf(stderr,"Usage: %s [--host | --join hostname | --browse | --quickjoin] [--lobby hostname] [--lobby-port 23074] [--server-name name] [--port 23073] [--name name] [--team auto|alpha|bravo|charlie|delta|spectator] [--map Arena2] [--list-maps] [--bots 0..31] [--bonuses 0..5] [--mode deathmatch|pointmatch|teammatch|ctf|rambo|inf|htf] [--score-limit N] [--time-limit minutes] [--friendly-fire] [--demo-frames N] [--benchmark N] [--vsync] [--screenshot path.png] [--menu-frame] [--asset-view degrees] [--map-view degrees | --map-plan] [--mute]\n",argv[0]);
             return 2;
         }
     }
@@ -536,12 +541,29 @@ int main(int argc,char **argv) {
             gostek_end();
             EndMode3D();
         } else {
-            if (view_mode==CAPTURE_MAP) {
-                Vec3 center=scale(add(world_bounds.min,world_bounds.max),.5f);
-                float extent=length(sub(world_bounds.max,world_bounds.min));
+            if (map_capture(view_mode)) {
+                Vec3 low=v3(INFINITY,INFINITY,INFINITY),high=v3(-INFINITY,-INFINITY,-INFINITY);
+                for(size_t i=0;i<world_solid_count;++i) {
+                    const WorldSolid *solid=&world_solids[i];
+                    if(solid->texture!=WORLD_TERRAIN)continue;
+                    for(unsigned face=0;face<solid->face_count;++face)if(solid->visible_faces&(1u<<face))
+                        for(unsigned v=0;v<solid->face_size[face];++v) {
+                            Vec3 point=solid->vertices[solid->faces[face][v]];
+                            low=v3(fminf(low.x,point.x),fminf(low.y,point.y),fminf(low.z,point.z));
+                            high=v3(fmaxf(high.x,point.x),fmaxf(high.y,point.y),fmaxf(high.z,point.z));
+                        }
+                }
+                Vec3 center=scale(add(low,high),.5f);
+                Vec3 size=sub(high,low);
+                float extent=length(size);
                 camera=(Camera3D){.position={center.x+sinf(view_angle)*extent*.65f,
                     center.y+extent*.5f,center.z+cosf(view_angle)*extent*.65f},
                     .target={center.x,center.y,center.z},.up={0,1,0},.fovy=48,.projection=CAMERA_PERSPECTIVE};
+                if(view_mode==CAPTURE_PLAN)camera=(Camera3D){
+                    .position={center.x,high.y+extent,center.z},
+                    .target={center.x,center.y,center.z},.up={0,0,-1},
+                    .fovy=1.08f*fmaxf(size.z,size.x*(float)GetScreenHeight()/(float)GetScreenWidth()),
+                    .projection=CAMERA_ORTHOGRAPHIC};
             }
             BeginMode3D(camera);
             rlDisableBackfaceCulling();
@@ -553,7 +575,7 @@ int main(int argc,char **argv) {
             gostek_draw_shadows(scene,scene_alpha);
             gostek_begin();
             for (int i=0;i<ACTOR_COUNT;++i) {
-                float visibility=i==local_actor && view_mode!=CAPTURE_MAP ? shoulder_view.body_visibility : 1;
+                float visibility=i==local_actor && !map_capture(view_mode) ? shoulder_view.body_visibility : 1;
                 gostek_draw(&scene->actors[i],i,view.tick,scene_alpha,(last_held[i]&INPUT_JETS)!=0,visibility,
                     session==CLIENT ? network_actor_pose(network,i) : NULL);
             }
@@ -567,9 +589,9 @@ int main(int argc,char **argv) {
                 int choice=interface_browser(&interface,lobby,&selected_server,&presses);
                 if (choice>=0) {selected_entry=*lobby_entry(lobby,(size_t)choice);join_server=JOIN_SELECTED;}
             }
-            else if (view_mode!=CAPTURE_MAP && screen==PLAYING && local_actor>=0)
+            else if (!map_capture(view_mode) && screen==PLAYING && local_actor>=0)
                 interface_hud(&interface,&game,view.hitmarker,view.killfeed,view.feed_ticks,names,local_actor,camera);
-            else if (view_mode!=CAPTURE_MAP && interface_menu(&interface,&selected,&secondary,&presses)==INTERFACE_PLAY) {
+            else if (!map_capture(view_mode) && interface_menu(&interface,&selected,&secondary,&presses)==INTERFACE_PLAY) {
                 if (session!=CLIENT && local_actor>=0)
                     game_select_loadout(&game.actors[local_actor],selected,secondary);
                 screen=PLAYING;
@@ -577,7 +599,7 @@ int main(int argc,char **argv) {
                 DisableCursor();
             }
         }
-        if (screen==MENU && view_mode!=CAPTURE_SOLDIER && view_mode!=CAPTURE_MAP) {
+        if (screen==MENU && view_mode!=CAPTURE_SOLDIER && !map_capture(view_mode)) {
             DrawText(TextFormat("%s%s   %s%s   Team: %s [T]",world_map_names[world_map_current],session==CLIENT?"":" [PgUp/PgDn]",
                 game_mode_names[game.mode],session==CLIENT?"":" [M]",game_team_names[chosen_team]),24,GetScreenHeight()-52,16,RAYWHITE);
             DrawText(TextFormat("[B] Servers   %s   %s",session==OFFLINE?"[H] Host":"[F10] Disconnect",network?network_message(network):"Offline"),24,GetScreenHeight()-28,16,RAYWHITE);

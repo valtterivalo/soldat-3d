@@ -1,5 +1,6 @@
 #include "game.h"
 #include "world.h"
+#include "world_layouts.h"
 #include "pose.h"
 #include "ragdoll.h"
 #include "generated_rules.h"
@@ -347,8 +348,10 @@ int main(void) {
     equal("shoulder camera reticle selects animated head surface", target_point.z, aim_bones[12].z - SRC_PART_RADIUS);
     game_free(&game);
 
+    world_load(world_map_index("ctf_Ash"));
     game = shooting_game(COLT);
-    Vec3 wall_probe=add(world_nav_nodes[0].position,v3(0,10,0));
+    const LayoutRoom *hall=&world_layout("ctf_Ash")->rooms[0];
+    Vec3 wall_probe=v3(hall->x,hall->y+hall->roof*.5f,hall->z-hall->depth*.5f-30);
     WorldHit wall=world_trace(wall_probe,add(wall_probe,v3(0,0,10000)),v3(0,0,0));
     check("enclosed arena provides solid cover",wall.box>=0);
     Vec3 wall_point=add(wall_probe,v3(0,0,10000*wall.fraction));
