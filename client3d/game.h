@@ -155,14 +155,15 @@ typedef struct {
 } Flag;
 typedef struct CombatHistory CombatHistory;
 typedef struct {
-    Vec3 target_position, target_velocity, aim_error, cover, grenade_target;
+    Vec3 target_position, target_velocity, observed_position, observed_velocity;
+    Vec3 aim_error, aim_bias, cover, grenade_target;
     Vec3 nav_dodge_direction;
-    uint64_t nav_dodge_projectile, seen_tick, perceive_tick, cover_tick, grenade_tick;
+    uint64_t nav_dodge_projectile, seen_tick, target_tick, perceive_tick, aim_tick, cover_tick, grenade_tick;
     uint32_t spawn_id, target_spawn, random;
     int target, reaction_ticks, burst_remaining, burst_pause, observed_ammo;
     int grenade_hold, roam_node, nav_strafe_sign, nav_neighbors;
     WeaponId observed_weapon;
-    float yaw_speed, pitch_speed, aim_yaw, aim_pitch;
+    float yaw_speed, pitch_speed;
 } BotMemory;
 typedef struct {
     Actor actors[ACTOR_COUNT];

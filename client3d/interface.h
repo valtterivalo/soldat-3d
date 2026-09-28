@@ -4,6 +4,7 @@
 #include "game.h"
 #include "raylib.h"
 #include "lobby.h"
+#include "hit_feedback.h"
 
 typedef enum {
     UI_HEALTH, UI_AMMO, UI_JET, UI_HEALTH_BAR, UI_RELOAD_BAR,
@@ -29,7 +30,7 @@ typedef struct {
 
 Interface interface_load(void);
 void interface_unload(Interface *interface);
-void interface_hud(const Interface *interface, const Game *game, int hitmarker,
+void interface_hud(const Interface *interface, const Game *game, HitFeedback hit,
     const char *killfeed, int feed_ticks, const char *const names[ACTOR_COUNT], int local_actor, Camera3D camera);
 int interface_browser(const Interface *interface, const Lobby *lobby, int *selected, const InputPresses *presses);
 InterfaceAction interface_menu(const Interface *interface, WeaponId *primary, WeaponId *secondary,

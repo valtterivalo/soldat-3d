@@ -77,7 +77,7 @@ static void text(const Interface *interface, const char *value, float x, float y
     rlPopMatrix();
 }
 
-void interface_hud(const Interface *interface, const Game *game, int hitmarker,
+void interface_hud(const Interface *interface, const Game *game, HitFeedback hit,
     const char *killfeed, int feed_ticks, const char *const names[ACTOR_COUNT], int local_actor, Camera3D camera) {
     const Actor *player = &game->actors[local_actor];
     const WeaponState *gun = &player->slots[player->active_slot];
@@ -167,7 +167,21 @@ void interface_hud(const Interface *interface, const Game *game, int hitmarker,
         Texture2D cursor = interface->textures[UI_CURSOR];
         float cross_scale = s / interface->cursor_scale * bloom;
         sprite(cursor, (w - cursor.width * cross_scale) / 2, (h - cursor.height * cross_scale) / 2,
-            cross_scale, hitmarker > 0 ? (Color){255, 65, 65, 255} : WHITE);
+            cross_scale, WHITE);
+        if (hit.kind != HIT_NONE && hit.age < .15f) {
+            float progress = hit.age / .15f;
+            float fade = 1 - progress * progress;
+            float inner = 9 + 1.5f * (1 - progress) * (1 - progress);
+            float outer = inner + (hit.kind == HIT_KILL ? 4 : 3);
+            for (int x = -1; x <= 1; x += 2) {
+                for (int y = -1; y <= 1; y += 2) {
+                    Vector2 from = {w / 2 + x * inner * s, h / 2 + y * inner * s};
+                    Vector2 to = {w / 2 + x * outer * s, h / 2 + y * outer * s};
+                    DrawLineEx(from, to, 2 * s, (Color){0, 0, 0, (unsigned char)(90 * fade)});
+                    DrawLineEx(from, to, s, (Color){255, 255, 255, (unsigned char)(225 * fade)});
+                }
+            }
+        }
     } else if (player->team==TEAM_SPECTATOR) {
         text(interface,"Spectating",w/2,h-70*s,14*s,.5f,WHITE);
     } else {

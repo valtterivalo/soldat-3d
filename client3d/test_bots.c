@@ -51,7 +51,7 @@ int main(void) {
         Game game=encounter(AK74,COLT,145,210,2);
         (void)bot_input(&game,0);
         game.actors[0].pitch=sign*(1.57079632679f-.01f);
-        game.bots[0].pitch_speed=sign*.075f;
+        game.bots[0].pitch_speed=sign*.045f;
         for(int tick=0;tick<60;++tick) {
             Input input=bot_input(&game,0);
             check(input.pitch>=-1.57079632679f && input.pitch<=1.57079632679f,
@@ -70,7 +70,7 @@ int main(void) {
         for(int tick=0;tick<180;++tick) {
             Input input=bot_input(&game,0);
             float delta=atan2f(sinf(input.yaw-game.actors[0].yaw),cosf(input.yaw-game.actors[0].yaw));
-            check(fabsf(delta)<=.0751f && fabsf(delta-previous)<=.0081f,
+            check(fabsf(delta)<=.0451f && fabsf(delta-previous)<=.0031f,
                 "close and colocated targets cannot create a heading flip");
             if(tick>=60)late_turning+=fabsf(delta);
             previous=delta;game.actors[0].yaw=input.yaw;game.actors[0].pitch=input.pitch;
@@ -79,6 +79,29 @@ int main(void) {
         check(late_turning<1.5f,"aim settles after acquiring even a colocated target");
         game_free(&game);
     }
+    Game observation=encounter(AK74,COLT,145,210,2);
+    Vec3 observed_start=observation.actors[1].position;
+    float heading=observation.actors[0].yaw;
+    for(int tick=0;tick<36;++tick) {
+        observation.actors[1].position=add(observed_start,v3((float)(tick<=18 ? tick : 36-tick),0,0));
+        Game left=observation,right=observation;
+        left.actors[1].velocity=v3(-40,25,17);right.actors[1].velocity=v3(35,-30,-19);
+        Input a=bot_input(&left,0),b=bot_input(&right,0);
+        check(a.yaw==b.yaw && a.pitch==b.pitch && a.held==b.held &&
+            a.forward==b.forward && a.right==b.right,
+            "equal visible positions produce identical decisions despite different authoritative enemy velocities");
+        observation.bots[0]=left.bots[0];observation.actors[0]=left.actors[0];
+        observation.actors[0].yaw=a.yaw;observation.actors[0].pitch=a.pitch;
+        if(tick<13)check(a.yaw==heading && !(a.held&INPUT_FIRE),
+            "new target acquisition delays both tracking and the trigger");
+        if(tick==24)check(observation.bots[0].target_tick<observation.tick &&
+            observation.bots[0].target_velocity.x>0,
+            "a newly observed reversal cannot instantly reverse the delayed tracking estimate");
+        if(tick==30)check(observation.bots[0].target_velocity.x<0,
+            "later observations correct the estimated direction without reading enemy velocity");
+        ++observation.tick;
+    }
+    game_free(&observation);
     Game retention=encounter(AK74,COLT,145,210,3);
     (void)bot_input(&retention,0);
     int retained=retention.bots[0].target,challenger=retained==1 ? 2 : 1;
@@ -89,10 +112,10 @@ int main(void) {
     check(world_trace(add(retention.actors[0].position,v3(0,10,0)),
         add(retention.actors[challenger].position,v3(0,10,0)),v3(0,0,0)).box<0,
         "crossing opponent remains visible");
-    retention.tick+=4;
+    retention.tick=retention.bots[0].perceive_tick;
     (void)bot_input(&retention,0);
     check(retention.bots[0].target==retained,"a slightly closer opponent cannot repeatedly steal attention");
-    retention.actors[retained].life=INACTIVE;retention.tick+=4;
+    retention.actors[retained].life=INACTIVE;retention.tick=retention.bots[0].perceive_tick;
     Input acquisition=bot_input(&retention,0);
     check(retention.bots[0].target==challenger && !(acquisition.held&INPUT_FIRE),
         "target loss reacquires a visible opponent with a fresh reaction interval");
@@ -119,7 +142,7 @@ int main(void) {
             Input inputs[ACTOR_COUNT]={0};
             uint32_t random=game.random;
             inputs[0]=bot_input(&game,0);
-            if(scenario==2) {
+            if(scenario==2 && tick<900) {
                 float displacement=dot(sub(game.actors[1].position,target_start),side);
                 if(displacement>25)strafe=-1;
                 if(displacement< -25)strafe=1;
@@ -130,7 +153,7 @@ int main(void) {
             float turn=atan2f(sinf(inputs[0].yaw-game.actors[0].yaw),cosf(inputs[0].yaw-game.actors[0].yaw));
             max_turn=fmaxf(max_turn,fabsf(turn));
             max_acceleration=fmaxf(max_acceleration,fabsf(turn-previous_turn));previous_turn=turn;
-            if(tick<8)check(!(inputs[0].held&INPUT_FIRE),"new targets require a reaction interval");
+            if(tick<13)check(!(inputs[0].held&INPUT_FIRE),"new targets require a reaction interval");
             if((inputs[0].held&INPUT_FIRE) && !(previous&INPUT_FIRE))++bursts;
             if(!(inputs[0].held&INPUT_FIRE))burst_shots=0;
             previous=inputs[0].held;
@@ -159,15 +182,16 @@ int main(void) {
             }
             if(kills>=(scenario<2 ? 2u : 1u) && (scenario!=3 || law) && (scenario!=4 || grenades))break;
         }
-        printf("weapon %s scenario%d shots%u hits%u kills%u LAW%u grenades%u bursts%u yaw%.5f acceleration%.5f health%.1f\n",
-            weapons[primaries[scenario]].name,scenario,shots,hits,kills,law,grenades,bursts,max_turn,max_acceleration,game.actors[0].health);
+        printf("weapon %s scenario%d shots%u hits%u kills%u LAW%u grenades%u bursts%u moving_hits%u yaw%.5f acceleration%.5f health%.1f\n",
+            weapons[primaries[scenario]].name,scenario,shots,hits,kills,law,grenades,bursts,moving_hits,max_turn,max_acceleration,game.actors[0].health);
         fflush(stdout);
-        check(max_turn<=.0751f,"aim has a finite human turn speed");
-        check(max_acceleration<=.0081f,"aim accelerates without snapping between targets");
+        check(max_turn<=.0451f,"aim has a finite human turn speed");
+        check(max_acceleration<=.0031f,"aim accelerates without snapping between targets");
         check(hits>0 && kills>0,"ordinary bot inputs produce actual projectile hits and kills");
         if(scenario<2)check((victims&(1u<<1)) && (victims&(1u<<2)) && largest_burst<=9 && bursts>1,
             "automatic bursts transfer damaging fire between opponents");
-        if(scenario==2)check(moved>20 && moving_hits>0,"Barrett hits a target moving through real ground physics");
+        if(scenario==2)check(moved>20 && shots>hits,
+            "rapid direction changes evade precision shots while a stationary target remains hittable");
         if(scenario==3)check(law>0 && game.actors[0].health>0,"clustered targets justify a safe LAW shot");
         if(scenario==4)check(grenades>0 && grenade_hits>0 && game.actors[0].health>0,
             "charged grenade trajectory damages a target without self killing");

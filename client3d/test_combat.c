@@ -4,6 +4,7 @@
 #include "pose.h"
 #include "ragdoll.h"
 #include "generated_rules.h"
+#include "hit_feedback.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +44,21 @@ static void step(Game *game, uint32_t held, uint32_t pressed) {
 }
 
 int main(void) {
+    GameEvent confirmations[7];
+    for (int i=0;i<6;++i) confirmations[i]=(GameEvent){.kind=EVENT_HIT,.actor=0,.target=1};
+    check("shotgun pellets produce one hit confirmation",hit_confirmation(confirmations,6,0)==HIT_DAMAGE);
+    confirmations[6]=(GameEvent){.kind=EVENT_KILL,.actor=0,.target=1};
+    check("lethal hit batch produces one kill confirmation",hit_confirmation(confirmations,7,0)==HIT_KILL);
+    confirmations[0]=confirmations[6];
+    check("kill confirmation survives later pellet hits",hit_confirmation(confirmations,6,0)==HIT_KILL);
+    check("other players hits do not confirm local damage",hit_confirmation(confirmations,7,2)==HIT_NONE);
+    check("taking hits does not confirm outgoing damage",hit_confirmation(confirmations,7,1)==HIT_NONE);
+    confirmations[0]=(GameEvent){.kind=EVENT_HIT,.actor=0,.target=0};
+    confirmations[1]=(GameEvent){.kind=EVENT_KILL,.actor=0,.target=0};
+    check("self damage and suicide produce no confirmation",hit_confirmation(confirmations,2,0)==HIT_NONE);
+    check("empty event batch produces no confirmation",hit_confirmation(NULL,0,0)==HIT_NONE);
+    confirmations[0]=(GameEvent){.kind=EVENT_SHOT,.actor=0,.target=1};
+    check("predicted shots do not confirm hits",hit_confirmation(confirmations,1,0)==HIT_NONE);
     world_init();
     poses_init();
     ragdolls_init();

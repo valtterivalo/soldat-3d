@@ -84,9 +84,9 @@ static int trajectory_clear(const Game *game,int index,Vec3 aim,float speed,floa
     return 1;
 }
 
-static float turn(float error,float tracking,float *speed) {
-    float requested=fmaxf(-.075f,fminf(.075f,tracking+error*.24f));
-    *speed+=fmaxf(-.008f,fminf(.008f,requested-*speed));
+static float turn(float error,float *speed) {
+    float requested=fmaxf(-.045f,fminf(.045f,error*.16f));
+    *speed+=fmaxf(-.003f,fminf(.003f,requested-*speed));
     return *speed;
 }
 
@@ -100,12 +100,11 @@ Input bot_input(Game *game,int index) {
         *memory=(BotMemory){.spawn_id=actor->spawn_id,.target=-1,.roam_node=-1,
             .random=(0x9e3779b9u^(uint32_t)(index+1)*0x85ebca6bu^actor->spawn_id*0xc2b2ae35u)|1u,
             .observed_ammo=actor->slots[actor->active_slot].ammo,
-            .observed_weapon=actor->slots[actor->active_slot].id,
-            .aim_yaw=actor->yaw,.aim_pitch=actor->pitch};
+            .observed_weapon=actor->slots[actor->active_slot].id};
     }
     Vec3 eye=chest(actor);
     if(fresh || game->tick>=memory->perceive_tick) {
-        memory->perceive_tick=game->tick+4;
+        memory->perceive_tick=game->tick+6;
         int selected=-1;float best=INFINITY;
         for(int i=0;i<ACTOR_COUNT;++i) {
             if(!opponent(game,index,i))continue;
@@ -113,7 +112,7 @@ Input bot_input(Game *game,int index) {
             Vec3 point=chest(other),delta=sub(point,eye);
             float distance=length(delta);
             int heard=other->controls&INPUT_FIRE;
-            if(distance>70 && dot(delta,direction(actor->yaw,actor->pitch))<-.35f*distance &&
+            if(distance>70 && dot(delta,direction(actor->yaw,actor->pitch))<.15f*distance &&
                 !(heard && distance<450))continue;
             if(!visible(actor,eye,point))continue;
             float score=distance*(i==memory->target && other->spawn_id==memory->target_spawn ? .62f : 1);
@@ -125,13 +124,18 @@ Input bot_input(Game *game,int index) {
         if(selected>=0) {
             const Actor *other=&game->actors[selected];
             if(memory->target!=selected || memory->target_spawn!=other->spawn_id) {
-                memory->reaction_ticks=9+(int)(random_unit(memory)*8);
+                memory->reaction_ticks=14+(int)(random_unit(memory)*10);
                 memory->burst_remaining=0;
-                memory->target_velocity=other->velocity;
-            } else memory->target_velocity=scale(add(memory->target_velocity,other->velocity),.5f);
+                memory->target_position=chest(other);memory->target_tick=game->tick;
+                memory->target_velocity=memory->observed_velocity=v3(0,0,0);
+            } else {
+                memory->target_position=memory->observed_position;memory->target_tick=memory->seen_tick;
+                memory->target_velocity=memory->observed_velocity;
+                memory->observed_velocity=scale(sub(chest(other),memory->observed_position),
+                    1/(float)(game->tick-memory->seen_tick));
+            }
             memory->target=selected;memory->target_spawn=other->spawn_id;
-            memory->target_position=chest(other);memory->seen_tick=game->tick;
-            memory->aim_error=v3(random_unit(memory)-.5f,random_unit(memory)-.5f,random_unit(memory)-.5f);
+            memory->observed_position=chest(other);memory->seen_tick=game->tick;
         } else if(memory->target>=0 && (game->tick-memory->seen_tick>90 ||
             !opponent(game,index,memory->target) || game->actors[memory->target].spawn_id!=memory->target_spawn))
             memory->target=-1;
@@ -139,10 +143,10 @@ Input bot_input(Game *game,int index) {
     if(memory->reaction_ticks>0)--memory->reaction_ticks;
     if(memory->burst_pause>0)--memory->burst_pause;
     int target=memory->target;
-    int seen=target>=0 && game->tick-memory->seen_tick<4 &&
+    int seen=target>=0 && game->tick-memory->seen_tick<6 &&
         game->actors[target].spawn_id==memory->target_spawn && opponent(game,index,target);
     Vec3 target_point=target<0 ? eye : add(memory->target_position,
-        scale(memory->target_velocity,(float)(game->tick-memory->seen_tick)+1));
+        scale(memory->target_velocity,(float)(game->tick-memory->target_tick)));
     float distance=length(sub(target_point,eye));
     int clustered=0;
     if(seen)for(int i=0;i<ACTOR_COUNT;++i)
@@ -157,8 +161,8 @@ Input bot_input(Game *game,int index) {
     memory->observed_ammo=gun->ammo;
     if(fired) {
         memory->burst_remaining-=fired;
-        if(weapons[gun->id].fire_mode==2)memory->burst_pause=1;
-        else if(memory->burst_remaining<=0)memory->burst_pause=12+(int)(random_unit(memory)*12);
+        if(weapons[gun->id].fire_mode==2)memory->burst_pause=weapons[gun->id].fire_interval+8+(int)(random_unit(memory)*8);
+        else if(memory->burst_remaining<=0)memory->burst_pause=18+(int)(random_unit(memory)*18);
     }
     int desired_slot=actor->active_slot;
     int law_slot=actor->slots[1].id==LAW ? 1 : actor->slots[0].id==LAW ? 0 : -1;
@@ -234,8 +238,13 @@ Input bot_input(Game *game,int index) {
             weapons[actor->grenade_weapon].inherited_velocity,SRC_GRENADE_TIMEOUT);
         intent=BOT_HOLD;approach=actor->position;
     }
-    Vec3 desired=actor_aim_direction(actor,add(solution.target,
-        scale(memory->aim_error,fminf(precision ? .8f : 2,distance*.02f))));
+    if(game->tick>=memory->aim_tick) {
+        memory->aim_tick=game->tick+30+(uint64_t)(random_unit(memory)*30);
+        memory->aim_bias=v3(random_unit(memory)*2-1,random_unit(memory)*2-1,random_unit(memory)*2-1);
+    }
+    memory->aim_error=add(memory->aim_error,scale(sub(memory->aim_bias,memory->aim_error),.08f));
+    float error=throwing ? 0 : fminf(distance*.025f,precision ? .8f+distance*.006f : 1.5f+distance*.014f);
+    Vec3 desired=actor_aim_direction(actor,add(solution.target,scale(memory->aim_error,error)));
     float yaw=atan2f(desired.x,desired.z),pitch=asinf(desired.y);
     if(throwing) {
         float low=-1.57079632679f,high=1.57079632679f;
@@ -249,12 +258,11 @@ Input bot_input(Game *game,int index) {
         pitch=(low+high)*.5f;
     }
     float yaw_error=atan2f(sinf(yaw-actor->yaw),cosf(yaw-actor->yaw));
-    float yaw_tracking=atan2f(sinf(yaw-memory->aim_yaw),cosf(yaw-memory->aim_yaw));
-    input.yaw=actor->yaw+turn(yaw_error,yaw_tracking,&memory->yaw_speed);
+    if(memory->reaction_ticks>0) {yaw_error=0;pitch=actor->pitch;}
+    input.yaw=actor->yaw+turn(yaw_error,&memory->yaw_speed);
     input.pitch=fmaxf(-1.57079632679f,fminf(1.57079632679f,
-        actor->pitch+turn(pitch-actor->pitch,pitch-memory->aim_pitch,&memory->pitch_speed)));
+        actor->pitch+turn(pitch-actor->pitch,&memory->pitch_speed)));
     memory->pitch_speed=input.pitch-actor->pitch;
-    memory->aim_yaw=yaw;memory->aim_pitch=pitch;
     bot_navigation(game,index,approach,intent,&input);
     int settled=actor->contact==GROUNDED && actor->velocity.x*actor->velocity.x+actor->velocity.z*actor->velocity.z<.16f;
     if(precision && intent==BOT_HOLD && settled && !memory->nav_dodge_projectile && !memory->nav_neighbors) {
@@ -265,8 +273,8 @@ Input bot_input(Game *game,int index) {
             input.held|=INPUT_PRONE;
     } else if(actor->pose==PRONE && actor->animation!=MOVE_GETUP)input.held|=INPUT_PRONE;
     float alignment=dot(direction(input.yaw,input.pitch),direction(yaw,pitch));
-    float tolerance=atan2f(precision ? 4 : 7,distance)+(precision ? 0 : .004f);
-    if(weapon->startup_time>0 && gun->startup_count<weapon->startup_time)tolerance+=.015f;
+    float tolerance=atan2f(7,distance)+.012f;
+    if(weapon->startup_time>0 && gun->startup_count<weapon->startup_time)tolerance+=.05f;
     int clear=seen && visible(actor,actor_muzzle(actor),target_point);
     if(throwing) {
         float speed=(float)memory->grenade_hold/weapons[actor->grenade_weapon].speed;

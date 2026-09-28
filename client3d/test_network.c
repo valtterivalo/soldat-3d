@@ -296,6 +296,7 @@ static void prediction_contract(void) {
     host.event_count = 0;
     ++host.tick;
     host.actors[0].health -= 10;
+    uint64_t hit_tick = host.tick;
     combat_event(&host, (GameEvent){EVENT_HIT, host.actors[0].position, local, 0, AK74});
     network_broadcast(server, &host);
     for (;;) {
@@ -320,9 +321,10 @@ static void prediction_contract(void) {
     for (size_t i = retry_count; i > 0; --i) { send_datagram(server, peer, retry[i - 1]); free(retry[i - 1].bytes); }
     free(retry);
     check(receive_state(peer, &client), "later snapshot recovers canonical health after an entirely lost update");
-    scene = network_render(peer, &client, now + 6.0 / TICK_RATE, 1);
+    scene = network_render(peer, &client, now + 5.0 / TICK_RATE, 1);
     check(client.actors[0].health == host.actors[0].health && scene->event_count == 1 && scene->events[0].kind == EVENT_HIT,
         "unacknowledged hit confirmation survives complete update loss and reordered retransmission");
+    check(network_view_tick(peer) < hit_tick, "local hit confirmation bypasses remote interpolation delay");
     Datagram lost_ack = receive_datagram(server);
     check(lost_ack.bytes[11] == 10, "fixture discards the reliable event acknowledgement");
     free(lost_ack.bytes);

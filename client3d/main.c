@@ -38,7 +38,7 @@ static int frame_compare(const void *a,const void *b) {
 }
 typedef struct {
     Sound shots[WEAPON_COUNT], reloads[COLT+1], pickups[PICKUP_BOW+1];
-    Sound explosion, rocket_explosion, cluster_explosion, cluster_open, drop, jets, flag, flag_return, capture;
+    Sound explosion, rocket_explosion, cluster_explosion, cluster_open, drop, jets, flag, flag_return, capture, hit;
     int muted;
 } Audio;
 typedef struct {
@@ -46,7 +46,8 @@ typedef struct {
     Audio audio;
     WeaponState weapon;
     uint64_t tick;
-    int hitmarker, feed_ticks;
+    HitFeedback hit;
+    int feed_ticks;
     char killfeed[128];
 } Presentation;
 static const char *shot_files[WEAPON_COUNT]={
@@ -102,7 +103,6 @@ static void present_state(Presentation *view,const Game *game,int local_actor) {
     for (size_t e=0;e<game->event_count;++e) {
         GameEvent event=game->events[e];
         if (event.kind==EVENT_SHOT) gostek_fire(event.actor,view->tick);
-        if (event.kind==EVENT_HIT && event.actor==local_actor) view->hitmarker=9;
         if (event.kind==EVENT_KILL) {
             snprintf(view->killfeed,sizeof(view->killfeed),"%s  %s  %s",game->names[event.actor],weapons[event.weapon].name,game->names[event.target]);
             view->feed_ticks=240;
@@ -132,6 +132,14 @@ static void present_state(Presentation *view,const Game *game,int local_actor) {
         float distance=length(sub(event.position,local->position));
         SetSoundVolume(sound,fmaxf(0,1-distance/750));
         if ((event.weapon!=CHAINSAW && event.weapon!=FLAMER) || !IsSoundPlaying(sound)) PlaySound(sound);
+    }
+    HitConfirmation confirmation=hit_confirmation(game->events,game->event_count,local_actor);
+    if (confirmation!=HIT_NONE) {
+        view->hit=(HitFeedback){.kind=confirmation};
+        if (!audio->muted) {
+            SetSoundPitch(audio->hit,confirmation==HIT_KILL ? .86f : 1);
+            PlaySound(audio->hit);
+        }
     }
 }
 
@@ -288,6 +296,16 @@ int main(int argc,char **argv) {
         audio->drop=sound_load("throwgun");
         audio->jets=sound_load("rocketz");
         audio->flag=sound_load("flag");audio->flag_return=sound_load("flag2");audio->capture=sound_load("capture");
+        float hit_samples[1680];
+        for (int i=0;i<1680;++i) {
+            float t=(float)i/48000;
+            float envelope=fminf(1,t/.001f)*expf(-t/.0065f)*(1-(float)i/1679);
+            hit_samples[i]=.32f*envelope*(.75f*sinf(2*PI*1800*t)+.25f*sinf(2*PI*2700*t));
+        }
+        audio->hit=LoadSoundFromWave((Wave){.frameCount=1680,.sampleRate=48000,
+            .sampleSize=32,.channels=1,.data=hit_samples});
+        if (!IsSoundValid(audio->hit)) abort();
+        SetSoundVolume(audio->hit,.75f);
     }
     Screen screen=browse ? BROWSER : demo_frames>0 ? PLAYING : MENU;
     WeaponId selected=AK74,secondary=COLT;
@@ -315,6 +333,7 @@ int main(int argc,char **argv) {
         InputPresses presses=pending_presses;
         pending_presses=(InputPresses){0};
         double frame_time=GetFrameTime();
+        view.hit.age+=(float)frame_time;
         if(screen==PLAYING && presses.keys[KEY_F3])stats=stats==STATS_HIDDEN ? STATS_VISIBLE : STATS_HIDDEN;
         if (presses.keys[KEY_ESCAPE]) {
             quick_join=0;
@@ -340,7 +359,7 @@ int main(int argc,char **argv) {
             network=network_join(selected_entry.address,selected_entry.port,name);
             network_select_team(network,chosen_team);
             session=CLIENT;local_actor=-1;screen=demo_frames ? PLAYING:MENU;
-            view.effects.count=0;view.hitmarker=view.feed_ticks=0;aim_scene=game;
+            view.effects.count=0;view.hit=(HitFeedback){0};view.feed_ticks=0;aim_scene=game;
             accumulator=0;pending=0;join_server=JOIN_IDLE;
             memset(last_held,0,sizeof(last_held));
         }
@@ -407,7 +426,7 @@ int main(int argc,char **argv) {
                 if (chosen_team!=TEAM_SPECTATOR) chosen_team=TEAM_NONE;
             } else game_restart(&game);
             intermission_ticks=0;
-            view.effects.count=0;view.hitmarker=view.feed_ticks=0;aim_scene=game;
+            view.effects.count=0;view.hit=(HitFeedback){0};view.feed_ticks=0;aim_scene=game;
             memset(last_held,0,sizeof(last_held));pending=0;
         }
         float target_fov=local_actor>=0 ? camera_focus_fov(&game.actors[local_actor],
@@ -438,7 +457,6 @@ int main(int argc,char **argv) {
             accumulator+=demo_frames && session==OFFLINE ? 1.0/TICK_RATE : frame_time;
             while (accumulator>=1.0/TICK_RATE) {
                 ++view.tick;
-                if(view.hitmarker>0)--view.hitmarker;
                 if(view.feed_ticks>0)--view.feed_ticks;
                 Input inputs[ACTOR_COUNT]={0};
                 if (session!=CLIENT) {
@@ -590,7 +608,7 @@ int main(int argc,char **argv) {
                 if (choice>=0) {selected_entry=*lobby_entry(lobby,(size_t)choice);join_server=JOIN_SELECTED;}
             }
             else if (!map_capture(view_mode) && screen==PLAYING && local_actor>=0)
-                interface_hud(&interface,&game,view.hitmarker,view.killfeed,view.feed_ticks,names,local_actor,camera);
+                interface_hud(&interface,&game,view.hit,view.killfeed,view.feed_ticks,names,local_actor,camera);
             else if (!map_capture(view_mode) && interface_menu(&interface,&selected,&secondary,&presses)==INTERFACE_PLAY) {
                 if (session!=CLIENT && local_actor>=0)
                     game_select_loadout(&game.actors[local_actor],selected,secondary);
@@ -644,6 +662,7 @@ int main(int argc,char **argv) {
         UnloadSound(audio->cluster_explosion);UnloadSound(audio->cluster_open);
         UnloadSound(audio->drop);UnloadSound(audio->jets);
         UnloadSound(audio->flag);UnloadSound(audio->flag_return);UnloadSound(audio->capture);
+        UnloadSound(audio->hit);
         CloseAudioDevice();
     }
     if (advertisement) lobby_host_close(advertisement);
