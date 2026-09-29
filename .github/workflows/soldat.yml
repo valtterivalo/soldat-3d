@@ -17,7 +17,7 @@ jobs:
         run: |
           cmake -S client3d -B build/tests -DSOLDAT3D_RENDERER=OFF -DCMAKE_BUILD_TYPE=RelWithDebInfo -DCMAKE_C_FLAGS="-fsanitize=undefined -fno-sanitize-recover=all"
           cmake --build build/tests --parallel
-          ctest --test-dir build/tests --output-on-failure
+          ctest --test-dir build/tests --output-on-failure --parallel "$(nproc)"
       - name: Build native client
         run: |
           cmake -S client3d -B build/client -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
