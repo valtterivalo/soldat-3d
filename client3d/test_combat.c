@@ -473,11 +473,12 @@ int main(void) {
     world_load(world_map_index("ctf_Ash"));
     game = shooting_game(COLT);
     const LayoutRoom *hall=&world_layout("ctf_Ash")->rooms[0];
-    Vec3 wall_probe=v3(hall->x,hall->y+hall->roof*.5f,hall->z-hall->depth*.5f-30);
+    Vec3 wall_probe=v3(hall->x,hall->y+hall->roof*.5f,hall->z);
     WorldHit wall=world_trace(wall_probe,add(wall_probe,v3(0,0,10000)),v3(0,0,0));
-    check("enclosed arena provides solid cover",wall.box>=0);
+    check("hall provides vertical solid cover",wall.box>=0 && wall.normal.z==-1);
     Vec3 wall_point=add(wall_probe,v3(0,0,10000*wall.fraction));
     game.actors[0].position = sub(wall_point,v3(0,10,9));
+    check("cover fixture starts with a clear physical body",world_pose_clear(game.actors[0].position,STANDING));
     Vec3 blocked_muzzle = actor_muzzle(&game.actors[0]);
     check("barrel origin stays in front of adjacent cover", blocked_muzzle.z <= wall_point.z+.001f);
     game.actors[1].life = ALIVE;

@@ -13,7 +13,9 @@ static void check(int pass,const char *contract) {
     exit(EXIT_FAILURE);
 }
 
-static Game encounter(WeaponId primary,WeaponId secondary,float minimum,float maximum,int count) {
+typedef enum { OPEN_ENCOUNTER, COVERED_ENCOUNTER } Encounter;
+
+static Game encounter(WeaponId primary,WeaponId secondary,float minimum,float maximum,int count,unsigned target_travel,Encounter kind) {
     Game game;game_init(&game,0x626f7473u,MODE_DEATHMATCH);
     game.score_limit=game.time_limit_ticks=0;
     for(int i=0;i<ACTOR_COUNT;++i)game.actors[i].life=i<count ? ALIVE : INACTIVE;
@@ -22,13 +24,41 @@ static Game encounter(WeaponId primary,WeaponId secondary,float minimum,float ma
         Vec3 x=world_nav_nodes[a].position,y=world_nav_nodes[b].position;
         float distance=length(sub(x,y));
         if(distance<minimum || distance>maximum || (primary!=BARRETT && fabsf(x.y-y.y)>1))continue;
-        if(world_trace(add(x,v3(0,10,0)),add(y,v3(0,10,0)),v3(0,0,0)).box>=0)continue;
+        unsigned visible=0;
+        for(;visible<=target_travel;++visible)
+            if(world_trace(add(x,v3(0,10,0)),add(y,v3((float)visible,10,0)),v3(0,3,0)).box>=0)break;
+        if(visible<=target_travel)continue;
         Vec3 side=v3(-(y.z-x.z)/distance,0,(y.x-x.x)/distance);
         if(primary==BARRETT && (world_trace(add(y,v3(0,7,0)),add(add(y,v3(0,7,0)),scale(side,35)),v3(3,6.8f,3)).box>=0 ||
             world_trace(add(y,v3(0,7,0)),sub(add(y,v3(0,7,0)),scale(side,35)),v3(3,6.8f,3)).box>=0))continue;
         Vec3 extra=add(y,v3(0,0,20));
         if(count>2 && (!world_pose_clear(extra,STANDING) ||
             world_trace(add(extra,v3(0,1,0)),sub(extra,v3(0,2,0)),v3(0,0,0)).box<0))continue;
+        if(count>2) {
+            Vec3 targets[]={y,extra};unsigned clear=0;
+            for(;clear<2;++clear) {
+                Vec3 delta=sub(targets[clear],x),lateral=scale(v3(-delta.z,0,delta.x),20/length(delta));
+                Vec3 crossing=add(x,add(scale(delta,.9f),lateral));
+                if(world_trace(add(x,v3(0,10,0)),add(crossing,v3(0,10,0)),v3(0,3,0)).box>=0)break;
+            }
+            if(clear<2)continue;
+        }
+        if(kind==COVERED_ENCOUNTER) {
+            int covered=0;
+            for(size_t edge=0;edge<world_nav_link_count && !covered;++edge) {
+                const NavLink *link=&world_nav_links[edge];
+                if(link->from!=(int)a || link->mode!=NAV_WALK)continue;
+                Vec3 point=world_nav_nodes[link->to].position;
+                float travel=length(sub(point,x));
+                if(travel<12 || travel>170 || fabsf(point.y-x.y)>1 ||
+                    world_trace(add(x,v3(0,7,0)),add(point,v3(0,7,0)),v3(3,6.8f,3)).box>=0)continue;
+                const float heights[]={8,10,14};unsigned hidden=0;
+                for(;hidden<sizeof(heights)/sizeof(*heights);++hidden)
+                    if(world_trace(add(y,v3(0,heights[hidden],0)),add(point,v3(0,heights[hidden],0)),v3(0,0,0)).box<0)break;
+                covered=hidden==sizeof(heights)/sizeof(*heights);
+            }
+            if(!covered)continue;
+        }
         from=x;to=y;found=1;
     }
     check(found,"arena supplies a clear encounter at the requested range");
@@ -48,7 +78,7 @@ static Game encounter(WeaponId primary,WeaponId secondary,float minimum,float ma
 int main(void) {
     world_init();poses_init();ragdolls_init();
     for(int sign=-1;sign<=1;sign+=2) {
-        Game game=encounter(AK74,COLT,145,210,2);
+        Game game=encounter(AK74,COLT,145,210,2,0,OPEN_ENCOUNTER);
         (void)bot_input(&game,0);
         game.actors[0].pitch=sign*(1.57079632679f-.01f);
         game.bots[0].pitch_speed=sign*.045f;
@@ -79,7 +109,7 @@ int main(void) {
         check(late_turning<1.5f,"aim settles after acquiring even a colocated target");
         game_free(&game);
     }
-    Game observation=encounter(AK74,COLT,145,210,2);
+    Game observation=encounter(AK74,COLT,145,210,2,18,OPEN_ENCOUNTER);
     Vec3 observed_start=observation.actors[1].position;
     float heading=observation.actors[0].yaw;
     for(int tick=0;tick<36;++tick) {
@@ -102,7 +132,7 @@ int main(void) {
         ++observation.tick;
     }
     game_free(&observation);
-    Game retention=encounter(AK74,COLT,145,210,3);
+    Game retention=encounter(AK74,COLT,145,210,3,0,OPEN_ENCOUNTER);
     (void)bot_input(&retention,0);
     int retained=retention.bots[0].target,challenger=retained==1 ? 2 : 1;
     check(retained>=1,"perception acquires a visible opponent");
@@ -124,7 +154,7 @@ int main(void) {
     for(size_t gun=0;gun<sizeof(precision_weapons)/sizeof(*precision_weapons);++gun) {
         unsigned hits=0;
         for(unsigned seed=1;seed<=24;++seed) {
-            Game game=encounter(precision_weapons[gun],COLT,360,600,2);
+            Game game=encounter(precision_weapons[gun],COLT,360,600,2,0,OPEN_ENCOUNTER);
             game.actors[0].spawn_id=seed;game.random=seed*0x9e3779b9u;
             game.actors[0].slots[0].fire_count=0;
             unsigned shots=0,hit=0;
@@ -148,7 +178,7 @@ int main(void) {
     const WeaponId secondaries[]={COLT,COLT,COLT,LAW,COLT,COLT,COLT};
     for(int scenario=0;scenario<7;++scenario) {
         Game game=encounter(primaries[scenario],secondaries[scenario],scenario==2 ? 360 : 145,
-            scenario==2 ? 600 : 210,scenario==2 ? 2 : 3);
+            scenario==2 ? 600 : 210,scenario==2 ? 2 : 3,0,scenario==6 ? COVERED_ENCOUNTER : OPEN_ENCOUNTER);
         if(scenario==4)game.actors[0].grenades=2;
         if(scenario==5)game.actors[0].slots[0].ammo=1;
         if(scenario==6)game.actors[0].slots[0].ammo=game.actors[0].slots[1].ammo=0;

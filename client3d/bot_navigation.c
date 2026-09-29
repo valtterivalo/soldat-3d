@@ -63,20 +63,6 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
         }
     }
     if (actor->nav_edge >= 0) source = world_nav_links[actor->nav_edge].from;
-    for (size_t node = 0; node < world_nav_node_count; ++node) {
-        if (world_gate_count && !world_nav_link_allows(
-            &(NavLink){.from=(int)node,.to=(int)node,.mode=NAV_WALK},movement_query)) continue;
-        Vec3 point = world_nav_nodes[node].position;
-        Vec3 to_actor = sub(point, actor->position), to_goal = sub(point, approach);
-        float score = length(to_actor) + fabsf(to_actor.y) * 2;
-        if (actor->nav_edge < 0 && score < source_distance) {
-            WorldHit sight = world_trace_for(center, add(point, v3(0, 7, 0)), v3(0, 0, 0), movement_query);
-            if (sight.box >= 0) score += length(sub(world_bounds.max, world_bounds.min));
-            if (score < source_distance) { source_distance = score; source = (int)node; }
-        }
-        score = dot(to_goal, to_goal) + to_goal.y * to_goal.y * 4;
-        if (score < goal_distance) { goal_distance = score; goal = (int)node; }
-    }
     WorldHit local_floor = {.box = -1};
     if ((intent == BOT_ENGAGE || intent == BOT_HOLD) && actor->contact == GROUNDED &&
         length(sub(approach, actor->position)) < 6 * SRC_PART_RADIUS)
@@ -93,7 +79,24 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
             actor->nav_edge = -1;
         } else source = committed->from;
     }
-    assert(source >= 0 && goal >= 0);
+    if (actor->nav_edge < 0) {
+        int find_source = source < 0;
+        for (size_t node = 0; node < world_nav_node_count; ++node) {
+            if (world_gate_count && !world_nav_link_allows(
+                &(NavLink){.from=(int)node,.to=(int)node,.mode=NAV_WALK},movement_query)) continue;
+            Vec3 point = world_nav_nodes[node].position;
+            Vec3 to_actor = sub(point, actor->position), to_goal = sub(point, approach);
+            float score = length(to_actor) + fabsf(to_actor.y) * 2;
+            if (find_source && score < source_distance) {
+                if (world_occluded_for(center, add(point, v3(0, 7, 0)), movement_query))
+                    score += length(sub(world_bounds.max, world_bounds.min));
+                if (score < source_distance) { source_distance = score; source = (int)node; }
+            }
+            score = dot(to_goal, to_goal) + to_goal.y * to_goal.y * 4;
+            if (score < goal_distance) { goal_distance = score; goal = (int)node; }
+        }
+    }
+    assert(source >= 0 && (actor->nav_edge >= 0 || goal >= 0));
     if (actor->nav_edge < 0 && source != goal && !local_ground &&
         !(intent == BOT_HOLD && actor->contact == GROUNDED)) {
         float costs[world_nav_node_count];
@@ -169,11 +172,13 @@ void bot_navigation(Game *game, int index, Vec3 approach, BotMoveIntent intent, 
     if (intent == BOT_HOLD && actor->contact == GROUNDED) waypoint = actor->position;
     Vec3 destination = waypoint;
     WorldHit corridor = world_trace_for(center, add(waypoint, v3(0, 7, 0)), v3(3, 6.8f, 3), movement_query);
-    WorldHit planned_corridor = world_trace_for(add(world_nav_nodes[source].position, v3(0, 7, 0)),
-        add(waypoint, v3(0, 7, 0)), v3(3, 6.8f, 3), movement_query);
     int route_recovery = edge && edge->mode == NAV_WALK && corridor.box >= 0 && corridor.normal.y < .5f &&
-        (planned_corridor.box < 0 || planned_corridor.normal.y >= .5f) &&
         length(sub(actor->position, world_nav_nodes[source].position)) > 12;
+    if (route_recovery) {
+        WorldHit planned_corridor = world_trace_for(add(world_nav_nodes[source].position, v3(0, 7, 0)),
+            add(waypoint, v3(0, 7, 0)), v3(3, 6.8f, 3), movement_query);
+        route_recovery = planned_corridor.box < 0 || planned_corridor.normal.y >= .5f;
+    }
     if (route_recovery) {
         Vec3 origin = world_nav_nodes[source].position;
         Vec3 route = sub(waypoint, origin);

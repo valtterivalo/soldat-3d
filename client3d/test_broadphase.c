@@ -1,4 +1,5 @@
 #include "world.h"
+#include "world_layouts.h"
 
 #undef NDEBUG
 #include <assert.h>
@@ -15,7 +16,8 @@ static WorldHit exhaustive(const TestHull *hulls,Vec3 start,Vec3 end,Vec3 extent
     WorldHit hit={1,{0,0,0},-1};
     for(size_t i=0;i<world_solid_count;++i) {
         const WorldSolid *solid=&world_solids[i];const TestHull *hull=&hulls[i];unsigned type=solid->poly_type;
-        if(query.kind==WORLD_TRACE_LIGHT) {if(solid->texture!=WORLD_TERRAIN)continue;}
+        if(query.kind==WORLD_TRACE_GROUND) {if(solid->texture!=WORLD_TERRAIN || solid->visible_faces!=2)continue;}
+        else if(query.kind==WORLD_TRACE_LIGHT) {if(solid->texture!=WORLD_TERRAIN)continue;}
         else {
             if(type==3 || type==23 || type==24 || type==25)continue;
             if((type==1 && query.kind!=WORLD_TRACE_BULLET && query.kind!=WORLD_TRACE_ENVIRONMENT) ||
@@ -56,9 +58,24 @@ static float random01(uint32_t *state)
 
 int main(void)
 {
-    uint32_t seed=0x129bad9u;size_t compared=0,occlusion_queries=0;
+    uint32_t seed=0x129bad9u;size_t compared=0,occlusion_queries=0,under_bridges=0;
     for(size_t map=0;map<world_map_count;++map) {
         world_load(map);TestHull *hulls=calloc(world_solid_count,sizeof(*hulls));assert(hulls);
+        const Layout *layout=world_layout(world_map_names[map]);
+        for(size_t room=0;room<layout->room_count;++room)if(layout->rooms[room].shape==BRIDGE) {
+            const LayoutRoom *bridge=&layout->rooms[room];
+            Vec3 a=v3(bridge->x,world_bounds.max.y,bridge->z),b=v3(bridge->x,world_bounds.min.y-1,bridge->z);
+            WorldHit ground=world_trace_for(a,b,v3(0,0,0),(WorldQuery){WORLD_TRACE_GROUND,0,WORLD_NO_FLAG});
+            WorldHit structure=world_trace_for(a,b,v3(0,0,0),(WorldQuery){WORLD_TRACE_LIGHT,0,WORLD_NO_FLAG});
+            assert(structure.box>=0);
+            if(ground.box<0)continue;
+            assert(world_solids[ground.box].visible_faces==2 && ground.normal.y>0);
+            assert(ground.fraction>=structure.fraction);
+            if(a.y+(b.y-a.y)*ground.fraction<bridge->y-10) {
+                assert(ground.box!=structure.box);
+                ++under_bridges;
+            }
+        }
         for(size_t i=0;i<world_solid_count;++i) {
             const WorldSolid *solid=&world_solids[i];TestHull *hull=&hulls[i];Vec3 center={0};
             hull->low=v3(FLT_MAX,FLT_MAX,FLT_MAX);hull->high=scale(hull->low,-1);
@@ -100,7 +117,7 @@ int main(void)
                 }
             }
         }
-        size_t cases=world_solid_count*2+128;
+        size_t cases=world_solid_count*2+134;
         for(size_t n=0;n<cases;++n) {
             Vec3 span=sub(world_bounds.max,world_bounds.min);
             Vec3 a=add(world_bounds.min,v3(random01(&seed)*span.x,random01(&seed)*span.y,random01(&seed)*span.z));
@@ -109,7 +126,15 @@ int main(void)
                 add(world_bounds.min,v3(random01(&seed)*span.x,random01(&seed)*span.y,random01(&seed)*span.z));
             if(n%7==0)b=a;
             Vec3 extents=n%3 ? v3(3,7,3) : v3(0,0,0);
-            WorldQuery query={(WorldTraceKind)(n%5),(unsigned)(n/5%6),(WorldFlagState)(n/30%2)};
+            WorldQuery query={(WorldTraceKind)(n%6),(unsigned)(n/6%6),(WorldFlagState)(n/36%2)};
+            if(n>=cases-6) {
+                unsigned axis=(unsigned)(n-(cases-6))/2;
+                Vec3 direction=v3(axis==0,axis==1,axis==2);
+                Vec3 corner=world_solids[world_solid_count/2].vertices[0];
+                a=sub(corner,scale(direction,length(span)));b=add(corner,scale(direction,length(span)));
+                extents=n%2 ? v3(3,7,3) : v3(0,0,0);
+                query=(WorldQuery){WORLD_TRACE_ENVIRONMENT,0,WORLD_NO_FLAG};
+            }
             WorldHit expected=exhaustive(hulls,a,b,extents,query),actual=world_trace_for(a,b,extents,query);
             if(expected.box!=actual.box || memcmp(&expected.fraction,&actual.fraction,sizeof(float)) || memcmp(&expected.normal,&actual.normal,sizeof(Vec3))) {
                 fprintf(stderr,"Broadphase mismatch %s case%zu expected hull%d fraction%a actual hull%d fraction%a\n",world_map_names[map],n,expected.box,expected.fraction,actual.box,actual.fraction);
@@ -126,5 +151,6 @@ int main(void)
         }
         free(hulls);
     }
-    world_free();printf("Broadphase: %zu traces and %zu occlusion queries on99 maps match exhaustive hull traces\n",compared,occlusion_queries);return 0;
+    assert(under_bridges>0);
+    world_free();printf("Broadphase: %zu traces and %zu occlusion queries on99 maps match exhaustive hull traces, %zu bridge decks excluded from ground queries\n",compared,occlusion_queries,under_bridges);return 0;
 }

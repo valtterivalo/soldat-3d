@@ -1,0 +1,20 @@
+[project]
+name = "soldat-terrain"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "shapely==2.1.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.16.9",
+    "ty>=0.0.84",
+]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = ["ANN", "D", "E501", "S101", "PLR2004", "PLR0912", "PLR0914", "PLR0915", "C901", "CPY001", "COM812", "T201"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

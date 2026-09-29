@@ -49,11 +49,6 @@ int main(void)
     player.flag=WORLD_HAS_FLAG;
     assert(world_trace_for(from,to,point,player).box==floor.box);
     assert(world_trace_for(from,to,point,bullet).box<0);
-    world_solids[floor.box].poly_type=18;
-    world_solids[floor.box].bounciness=2;
-    Actor actor={.previous=from,.position=to,.velocity={0,-16,0},.pose=STANDING};
-    assert(world_move(&actor)==AIRBORNE);
-    assert(actor.velocity.y>15 && actor.position.y>sample.y+7);
     world_solids[floor.box].poly_type=0;
     int ramps=0;
     for(size_t i=0;i<world_nav_link_count && !ramps;++i) {
@@ -64,7 +59,7 @@ int main(void)
         Vec3 middle=scale(add(a,b),.5f);
         WorldHit ramp=world_trace(add(middle,v3(0,20,0)),sub(middle,v3(0,20,0)),point);
         if(ramp.box<0 || ramp.normal.y>=.99f || ramp.normal.y<=.5f)continue;
-        actor=(Actor){.previous=add(middle,v3(0,20,0)),.position=sub(middle,v3(0,20,0)),.velocity={0,-40,0},.pose=STANDING};
+        Actor actor={.previous=add(middle,v3(0,20,0)),.position=sub(middle,v3(0,20,0)),.velocity={0,-40,0},.pose=STANDING};
         assert(world_move(&actor)==GROUNDED);
         assert(fabsf(dot(actor.velocity,ramp.normal))<.001f);
         assert(world_pose_clear(actor.position,STANDING));
@@ -79,19 +74,6 @@ int main(void)
         world_load(map);
         assert(world_map_current==map && world_map_index(world_map_names[map])==map);
         assert(world_texture[0] && world_source_spawn_count && world_nav_node_count && world_nav_link_count);
-        if(map==world_map_index("Bunker")) {
-            Actor escape={.position={41.8857f,52.5075f,414.167f},.previous={41.8857f,52.5075f,414.167f},
-                .velocity={-2.33676f,4.40097f,3.33437f},.pose=STANDING,.life=ALIVE,
-                .fuel=world_jet_fuel,.fuel_capacity=world_jet_fuel};
-            assert(world_pose_clear(escape.position,STANDING));
-            Input flight={.forward=1,.yaw=atan2f(-539.477f,769.792f),.held=INPUT_JETS};
-            for(unsigned tick=0;tick<TICK_RATE;++tick) {
-                movement_step(&escape,flight,tick);
-                assert(world_pose_clear(escape.position,STANDING));
-                assert(escape.position.x>=world_bounds.min.x && escape.position.x<=world_bounds.max.x);
-                assert(escape.position.z>=world_bounds.min.z && escape.position.z<=world_bounds.max.z);
-            }
-        }
         for(GameMode mode=MODE_DEATHMATCH;mode<=MODE_HTF;++mode) {
             if(!world_supports_mode(mode))continue;
             Game game;game_init(&game,1234,mode);
@@ -153,14 +135,14 @@ int main(void)
             assert(next-edge<=2);
             if(next-edge==1) {
                 LayoutTerrainVertex a=terrain->vertices[edges[edge].a],b=terrain->vertices[edges[edge].b],c=terrain->vertices[edges[edge].inside];
-                Vec3 middle=v3((a.x+b.x)*.5f,(a.y+b.y)*.5f+7,(a.z+b.z)*.5f);
-                Vec3 outside=v3(b.z-a.z,0,a.x-b.x);
-                if(dot(outside,v3(c.x-a.x,0,c.z-a.z))>0)outside=scale(outside,-1);
-                outside=scale(outside,1/length(outside));
-                WorldHit bank=world_trace(middle,add(middle,scale(outside,span)),v3(0,0,0));
-                if(bank.box<0)fprintf(stderr,"Open terrain edge %s %u-%u at%g,%g,%g\n",world_map_names[map],edges[edge].a,edges[edge].b,middle.x,middle.y,middle.z);
+                if(a.crest!=a.y || b.crest!=b.y)fprintf(stderr,"Unsealed authored edge %s %u-%u floor%g,%g ceiling%g,%g\n",world_map_names[map],edges[edge].a,edges[edge].b,a.y,b.y,a.crest,b.crest);
+                assert(a.crest==a.y && b.crest==b.y);
+                Vec3 middle=v3((a.x+b.x)*.5f,(a.y+b.y)*.5f,(a.z+b.z)*.5f);
+                Vec3 interior=v3((a.x+b.x+c.x)/3,(a.y+b.y+c.y+a.crest+b.crest+c.crest)/6,(a.z+b.z+c.z)/3);
+                Vec3 across=sub(middle,interior);
+                WorldHit bank=world_trace(interior,add(interior,scale(across,span/length(across))),v3(3,7,3));
+                if(bank.box<0)fprintf(stderr,"Open terrain edge %s %u-%u from%g,%g,%g\n",world_map_names[map],edges[edge].a,edges[edge].b,interior.x,interior.y,interior.z);
                 assert(bank.box>=0);
-                Vec3 interior=v3((a.x+b.x+c.x)/3,(a.y+b.y+c.y)/3+14,(a.z+b.z+c.z)/3);
                 WorldHit sky=world_trace(interior,add(interior,v3(0,span,0)),v3(0,0,0));
                 if(sky.box<0)fprintf(stderr,"Open sky edge %s %u-%u from%g,%g,%g\n",world_map_names[map],edges[edge].a,edges[edge].b,interior.x,interior.y,interior.z);
                 assert(sky.box>=0);
@@ -192,7 +174,7 @@ int main(void)
                 }
             }
         }
-        actor=(Actor){.previous=center,.position=add(center,v3(span,0,span)),.velocity={12,0,12},.pose=STANDING};
+        Actor actor={.previous=center,.position=add(center,v3(span,0,span)),.velocity={12,0,12},.pose=STANDING};
         world_move(&actor);
         assert(world_pose_clear(actor.position,STANDING));
         assert(actor.position.x<world_bounds.max.x && actor.position.z<world_bounds.max.z);

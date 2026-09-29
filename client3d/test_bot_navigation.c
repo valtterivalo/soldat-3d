@@ -3,6 +3,7 @@
 #include "pose.h"
 #include "ragdoll.h"
 #include "world.h"
+#include "world_layouts.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -19,7 +20,21 @@ int main(void) {
     game_init(&game, 789, MODE_DEATHMATCH);
     for (int i = 1; i < ACTOR_COUNT; ++i) game.actors[i].life = INACTIVE;
     Actor *actor = &game.actors[0];
-    Vec3 center = world_nav_nodes[0].position;
+    const Layout *layout = world_layout(world_map_names[world_map_current]);
+    Vec3 center = {0};
+    int platform = 0;
+    for (size_t i = 0; i < layout->room_count; ++i) {
+        const LayoutRoom *room = &layout->rooms[i];
+        if (room->shape != BRIDGE || room->width < 196 || room->depth < 46) continue;
+        center = v3(room->x, room->y + .05f, room->z);
+        Vec3 body = add(center, v3(0, 7, 0));
+        WorldHit support = world_trace(body, sub(body, v3(0, .1f, 0)), v3(58, 7, 23));
+        if (world_trace(body, body, v3(58, 7, 23)).box >= 0 ||
+            support.box < 0 || support.normal.y != 1) continue;
+        platform = 1;
+        break;
+    }
+    check(platform, "arena supplies a clear flat bridge span for movement fixtures");
     actor->position = actor->previous = center;
     actor->velocity = actor->force = v3(0, 0, 0);
     actor->contact = GROUNDED;
@@ -39,16 +54,22 @@ int main(void) {
     size_t saved_node_count = world_nav_node_count, saved_link_count = world_nav_link_count;
     NavNode nodes[] = {{add(center, v3(-55, 0, 0))}, {add(center, v3(55, 0, 0))},
         {add(center, v3(-55, 0, 20))}};
-    NavLink links[] = {{0, 1, NAV_WALK, 110, 0, center.y}, {0, 2, NAV_WALK, 20, 0, center.y}};
+    NavLink links[] = {{0, 1, NAV_WALK, 110, 0, center.y}, {0, 2, NAV_WALK, 20, 0, center.y},
+        {1, 2, NAV_WALK, 112, 0, center.y}};
     world_nav_nodes = nodes; world_nav_node_count = 3;
-    world_nav_links = links; world_nav_link_count = 2;
+    world_nav_links = links; world_nav_link_count = 3;
     actor->position = actor->previous = add(nodes[0].position, v3(10, 0, 0));
     actor->nav_edge = 0; actor->nav_goal = 1;
     Input committed = {.yaw = 0};
     bot_navigation(&game, 0, nodes[2].position, BOT_TRAVERSE, &committed);
-    check(actor->nav_edge == 0 && committed.right < 0,
+    check(actor->nav_edge == 0 && actor->nav_goal == 1 && committed.right < 0,
         "moving target cannot reverse a committed route before its junction");
+    actor->position = actor->previous = add(nodes[1].position, v3(-4, 0, 0));
+    bot_navigation(&game, 0, nodes[2].position, BOT_TRAVERSE, &committed);
+    check(actor->nav_edge == 2 && actor->nav_goal == 2 && committed.right > 0,
+        "arriving at a junction replans toward the current target in the same tick");
     actor->position = actor->previous = nodes[0].position;
+    check(world_pose_clear(actor->position, actor->pose), "running fixture starts with a clear physical body");
     actor->velocity = actor->force = v3(0, 0, 0);
     actor->nav_edge = -1;
     float top_speed = 0;
@@ -145,14 +166,15 @@ int main(void) {
     check(health[0] < SRC_DEFAULT_HEALTH && health[1] > health[0] && escaped > SRC_PART_RADIUS,
         "ordinary lateral inputs evade an incoming physical round that hits a stationary soldier");
     {
-        NavNode deck[]={{{-110,116.05f,110}},{{80,116.05f,110}}};
-        NavLink crossing={0,1,NAV_WALK,190,0,116.05f};
+        NavNode deck[]={{add(center,v3(-95,0,0))},{add(center,v3(95,0,0))}};
+        NavLink crossing={0,1,NAV_WALK,190,0,center.y};
         saved_nodes=world_nav_nodes;saved_links=world_nav_links;
         saved_node_count=world_nav_node_count;saved_link_count=world_nav_link_count;
         world_nav_nodes=deck;world_nav_node_count=2;world_nav_links=&crossing;world_nav_link_count=1;
         game_init(&game,789,MODE_DEATHMATCH);
         for(int i=1;i<ACTOR_COUNT;++i)game.actors[i].life=INACTIVE;
         actor=&game.actors[0];actor->position=actor->previous=deck[0].position;
+        check(world_pose_clear(actor->position,actor->pose),"bunny fixture starts with a clear physical body");
         float damping=SRC_EDAMPING*SRC_SURFACECOEFX;
         actor->velocity=v3(SRC_RUNSPEED*damping/(1-damping),0,0);
         actor->force=v3(0,0,0);actor->contact=GROUNDED;

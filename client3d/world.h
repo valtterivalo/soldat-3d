@@ -13,12 +13,14 @@ typedef struct {
     WorldTexture texture;
 } WorldSolid;
 
+typedef enum { PROP_TERRAIN, PROP_ARCHITECTURE } PropSupport;
 typedef struct {
     unsigned active, style;
     int width, height;
     Vec3 position;
     float yaw, scale_x, scale_y;
     unsigned char color[4];
+    PropSupport support;
 } WorldProp;
 
 typedef enum { NAV_WALK, NAV_JET, NAV_DROP, NAV_JUMP } NavTravel;
@@ -32,7 +34,7 @@ extern NavNode *world_nav_nodes;
 extern NavLink *world_nav_links;
 extern size_t world_nav_node_count, world_nav_link_count;
 typedef struct { Vec3 position; unsigned type; } WorldSpawn;
-typedef enum { WORLD_TRACE_ENVIRONMENT, WORLD_TRACE_ACTOR, WORLD_TRACE_BULLET, WORLD_TRACE_ITEM, WORLD_TRACE_LIGHT } WorldTraceKind;
+typedef enum { WORLD_TRACE_ENVIRONMENT, WORLD_TRACE_ACTOR, WORLD_TRACE_BULLET, WORLD_TRACE_ITEM, WORLD_TRACE_LIGHT, WORLD_TRACE_GROUND } WorldTraceKind;
 typedef enum { WORLD_NO_FLAG, WORLD_HAS_FLAG } WorldFlagState;
 typedef struct { WorldTraceKind kind; unsigned team; WorldFlagState flag; } WorldQuery;
 extern size_t world_gate_count;
