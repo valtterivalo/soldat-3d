@@ -7,7 +7,7 @@ static void animate(Actor *actor, MoveAnimation animation, int frame) {
     actor->animation_tick = frame;
 }
 
-void movement_step(Actor *actor, Input input, uint64_t tick) {
+unsigned movement_step(Actor *actor, Input input, uint64_t tick) {
     actor->previous = actor->position;
     actor->velocity = add(actor->velocity, actor->force);
     actor->velocity.y -= SRC_GRAV;
@@ -183,4 +183,5 @@ void movement_step(Actor *actor, Input input, uint64_t tick) {
         actor->velocity.z *= SRC_MAX_VELOCITY / horizontal_speed;
     }
     actor->velocity.y = fmaxf(-SRC_MAX_VELOCITY, fminf(SRC_MAX_VELOCITY, actor->velocity.y));
+    return surface;
 }

@@ -224,12 +224,14 @@ static void game_transfer(Codec *c, Game *game) {
 
 Snapshot replica_encode(const Game *game) {
     assert(game->projectile_count <= UINT32_MAX && game->pickup_count <= UINT32_MAX);
-    Codec codec = {.transfer = ENCODE};
+    size_t size = HEADER_BYTES + ACTOR_COUNT * ACTOR_BYTES + 8 +
+        game->projectile_count * PROJECTILE_BYTES + game->pickup_count * PICKUP_BYTES;
+    Codec codec = {.data = malloc(size), .capacity = size, .transfer = ENCODE};
+    if (!codec.data) abort();
     Game copy = *game;
     game_transfer(&codec, &copy);
     if (codec.rejected) abort();
-    assert(codec.offset == HEADER_BYTES + ACTOR_COUNT * ACTOR_BYTES + 8 +
-        game->projectile_count * PROJECTILE_BYTES + game->pickup_count * PICKUP_BYTES);
+    assert(codec.offset == size);
     return (Snapshot){codec.data, codec.offset};
 }
 

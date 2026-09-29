@@ -122,7 +122,7 @@ int world_pose_clear(Vec3 feet, Pose pose);
 Contact world_move(Actor *actor);
 float actor_height(Pose pose);
 Vec3 actor_muzzle(const Actor *actor);
-void movement_step(Actor *actor, Input input, uint64_t tick);
+unsigned movement_step(Actor *actor, Input input, uint64_t tick);
 
 typedef struct {
     Vec3 position, previous, velocity, initial, hit_spot;

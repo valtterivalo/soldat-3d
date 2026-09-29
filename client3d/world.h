@@ -7,8 +7,8 @@ typedef enum { WORLD_TERRAIN, WORLD_SKY, WORLD_HIDDEN } WorldTexture;
 typedef struct {
     Vec3 vertices[16];
     unsigned char color[16][4];
-    unsigned vertex_count, face_count, face_size[10], faces[10][8], poly_type, visible_faces;
-    float uv[16][2];
+    unsigned vertex_count, face_count, poly_type, visible_faces;
+    unsigned char face_size[10], faces[10][8];
     float bounciness;
     WorldTexture texture;
 } WorldSolid;

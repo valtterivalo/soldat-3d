@@ -27,6 +27,18 @@ int main(void) {
             check(snapshot_unpack(&restored,packed.data,packed.size),"small compressed and uncompressed inputs unpack");
             check(restored.size==size && (!size || !memcmp(restored.data,bytes,size)),
                 "zeroes, incompressible bytes and mixed data survive byte-exactly");
+            unsigned char bounded[sizeof(bytes)+1];
+            memset(bounded,77,sizeof(bounded));
+            size_t decoded_size=SIZE_MAX;
+            check(snapshot_unpack_into(bounded,size,&decoded_size,packed.data,packed.size),
+                "bounded packet decoding preserves compressed and uncompressed bytes");
+            check(decoded_size==size && (!size || !memcmp(bounded,bytes,size)) && bounded[size]==77,
+                "bounded decoding writes exactly the declared packet length");
+            if (size) {
+                decoded_size=SIZE_MAX;
+                check(!snapshot_unpack_into(bounded,size-1,&decoded_size,packed.data,packed.size) && decoded_size==SIZE_MAX,
+                    "insufficient packet capacity rejects without accepting a partial payload");
+            }
             free(packed.data);
         }
     }
@@ -116,6 +128,12 @@ int main(void) {
         "missing or mismatched baseline leaves the prior decoded state intact");
     free(wrong.data);free(identical.data);
     for (size_t size=0;size<packed.size;++size) {
+        unsigned char bounded[canonical.size+1];
+        bounded[canonical.size]=77;
+        size_t decoded_size=SIZE_MAX;
+        check(!snapshot_unpack_into(bounded,canonical.size,&decoded_size,packed.data,size) &&
+            decoded_size==SIZE_MAX && bounded[canonical.size]==77,
+            "truncated bounded packets cannot accept partial state or overrun capacity");
         check(!snapshot_unpack(&restored,packed.data,size),"every truncated packed snapshot is rejected");
         check(restored.data==original && restored.size==1 && restored.data[0]==77,
             "truncated snapshots cannot partially replace owned output");

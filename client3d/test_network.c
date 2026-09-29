@@ -54,7 +54,6 @@ static Datagram receive_datagram_at(Network *receiver, int line) {
             continue;
         }
         check(size>=0,"fixture receives complete UDP datagram");
-        if (size >= NETWORK_PACKET_HEADER && bytes[11] == 8) continue;
         Datagram packet={.size=(size_t)size,.bytes=malloc((size_t)size)};
         check(packet.bytes!=NULL,"allocate datagram fixture");memcpy(packet.bytes,bytes,(size_t)size);
         return packet;
@@ -275,9 +274,38 @@ static void prediction_contract(void) {
     while (network_received_sequence(server, local) < 1) network_receive(server, &host);
     Input inputs[ACTOR_COUNT] = {0};
     network_inputs(server, inputs);
-    game_step(&host, inputs);
+    uint64_t sent_before=network_stats(server).sent_packets;
     network_broadcast(server, &host);
-    check(receive_state(peer, &client), "server confirms predicted shot");
+    size_t older_count=(size_t)(network_stats(server).sent_packets-sent_before);
+    Datagram *older=malloc(older_count*sizeof(*older));
+    check(older!=NULL,"allocate pre-shot acknowledgement fixture");
+    for (size_t i=0;i<older_count;++i) older[i]=receive_datagram(peer);
+    game_step(&host, inputs);
+    sent_before=network_stats(server).sent_packets;
+    network_broadcast(server, &host);
+    size_t shot_count=(size_t)(network_stats(server).sent_packets-sent_before);
+    Datagram *shot=malloc(shot_count*sizeof(*shot));
+    check(shot!=NULL,"allocate confirmed-shot acknowledgement fixture");
+    for (size_t i=0;i<shot_count;++i) {
+        shot[i]=receive_datagram(peer);
+        check(shot[i].bytes[11]!=8,"snapshot fragments carry acknowledgements without standalone packets");
+        if (shot[i].bytes[11]!=9) send_datagram(server,peer,shot[i]);
+    }
+    check(network_receive(peer,&client),"state acknowledgement arrives before the shot event");
+    check(!memcmp(older[0].bytes+28,shot[0].bytes+28,8) &&
+        memcmp(older[0].bytes+57,shot[0].bytes+57,8),
+        "fixture reorders equal input acknowledgements with different event watermarks");
+    for (size_t i=0;i<older_count;++i) {send_datagram(server,peer,older[i]);free(older[i].bytes);}
+    free(older);
+    check(!network_receive(peer,&client),"old fragments cannot roll back confirmed state");
+    for (size_t i=0;i<shot_count;++i) {
+        if (shot[i].bytes[11]==9) send_datagram(server,peer,shot[i]);
+        free(shot[i].bytes);
+    }
+    free(shot);
+    network_receive(peer,&client);
+    check(!network_render(peer,&client,network_time()+4.0/TICK_RATE,1)->event_count,
+        "older equal acknowledgements cannot retire prediction before delayed authoritative shot events");
     check(!client.event_count && client.actors[local].slots[0].ammo == host.actors[local].slots[0].ammo,
         "confirmed shot reconciles ammo without replaying local audio or flash");
     host.event_count = 0;
@@ -348,7 +376,7 @@ static unsigned relay_delivery_frame(Network *server, Network *peer, Game *repli
     check(first.bytes[11] == 4, "delivery fixture captures a state datagram");
     uint32_t total;
     memcpy(&total, first.bytes + 40, 4); total = ntohl(total);
-    size_t fragments = (total + NETWORK_PACKET_DATA - 1) / NETWORK_PACKET_DATA;
+    size_t fragments = (total + NETWORK_STATE_DATA - 1) / NETWORK_STATE_DATA;
     check(fragments == 1, "compact two-player state fits one datagram");
     unsigned repairs = first.bytes[56];
     size_t count = 1 + repairs;
@@ -660,12 +688,17 @@ int main(void) {
     check(!(recovered[alice].pressed&INPUT_GRENADE),"reordered old command does not repeat the recovered tap");
     free(lost_input.bytes);
     game_step(&host,recovered);
+    for (int i=0;i<ACTOR_COUNT*2;++i) {
+        size_t item=pickups_spawn(&host,PICKUP_WEAPON,AK74,
+            v3(sinf((float)i)*337,10000+cosf((float)i*.73f)*200,cosf((float)i)*281),v3(0,0,0),17,-1);
+        host.pickups[item].yaw=sinf((float)i*.21f)*3.14159265f;
+    }
     Snapshot loss_state=replica_encode(&host);
     network_broadcast(server,&host);
     Datagram first_loss=receive_datagram(a);
     uint32_t loss_bytes=(uint32_t)first_loss.bytes[40]<<24|(uint32_t)first_loss.bytes[41]<<16|
         (uint32_t)first_loss.bytes[42]<<8|first_loss.bytes[43];
-    size_t loss_fragments=(loss_bytes+NETWORK_PACKET_DATA-1)/NETWORK_PACKET_DATA;
+    size_t loss_fragments=(loss_bytes+NETWORK_STATE_DATA-1)/NETWORK_STATE_DATA;
     size_t loss_count=loss_fragments+first_loss.bytes[56]*((loss_fragments+254)/255);
     Datagram *loss=malloc(loss_count*sizeof(*loss));check(loss!=NULL,"allocate loss fixture");
     loss[0]=first_loss;
@@ -673,13 +706,23 @@ int main(void) {
     uint64_t replica_tick=left.tick;
     for (size_t i=1;i<loss_fragments;++i) send_datagram(server,a,loss[i]);
     check(!network_receive(a,&left) && left.tick==replica_tick,"partial snapshot never changes authoritative state");
+    check(loss_fragments>1,"acknowledgement fixture loses an incomplete multi-fragment state");
+    network_send_input(a,&left,(Input){0},AK74,COLT);
+    Datagram acknowledged_command=receive_datagram(server);
+    Snapshot acknowledged_inputs={0};
+    check(acknowledged_command.bytes[11]==3 && snapshot_unpack(&acknowledged_inputs,
+        acknowledged_command.bytes+NETWORK_PACKET_HEADER,acknowledged_command.size-NETWORK_PACKET_HEADER) &&
+        acknowledged_inputs.size==104,"partial state receipt acknowledges processed inputs before complete reconciliation");
+    send_datagram(a,server,acknowledged_command);
+    network_receive(server,&host);network_inputs(server,recovered);
+    free(acknowledged_command.bytes);free(acknowledged_inputs.data);
     game_step(&host,recovered);
     Snapshot complete_state=replica_encode(&host);
     network_broadcast(server,&host);
     Datagram first_complete=receive_datagram(a);
     uint32_t complete_bytes=(uint32_t)first_complete.bytes[40]<<24|(uint32_t)first_complete.bytes[41]<<16|
         (uint32_t)first_complete.bytes[42]<<8|first_complete.bytes[43];
-    size_t complete_fragments=(complete_bytes+NETWORK_PACKET_DATA-1)/NETWORK_PACKET_DATA;
+    size_t complete_fragments=(complete_bytes+NETWORK_STATE_DATA-1)/NETWORK_STATE_DATA;
     size_t complete_count=complete_fragments+first_complete.bytes[56]*((complete_fragments+254)/255);
     Datagram *complete=malloc(complete_count*sizeof(*complete));check(complete!=NULL,"allocate reorder fixture");
     complete[0]=first_complete;

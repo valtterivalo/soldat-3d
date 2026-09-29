@@ -344,6 +344,20 @@ static int unpack_frame(unsigned char *output,size_t expected,const Snapshot *ba
     return valid;
 }
 
+int snapshot_unpack_into(unsigned char *data,size_t capacity,size_t *decoded_size,
+    const unsigned char *packed,size_t size) {
+    if (size<5 || packed[0]>1) return 0;
+    size_t expected=(uint32_t)packed[1]<<24 | (uint32_t)packed[2]<<16 |
+        (uint32_t)packed[3]<<8 | packed[4];
+    if (expected>capacity) return 0;
+    if (packed[0]==0) {
+        if (size-5!=expected) return 0;
+        if (expected) memcpy(data,packed+5,expected);
+    } else if (!unpack_frame(data,expected,NULL,packed+5,size-5)) return 0;
+    *decoded_size=expected;
+    return 1;
+}
+
 static int unpack(Snapshot *raw,const Snapshot *base,const unsigned char *packed,size_t size) {
     if (size<5 || packed[0]>1) return 0;
     size_t expected=(uint32_t)packed[1]<<24 | (uint32_t)packed[2]<<16 |

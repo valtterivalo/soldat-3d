@@ -1,3 +1,6 @@
+#if defined(__linux__)
+#define _GNU_SOURCE
+#endif
 #define _POSIX_C_SOURCE 200809L
 #include "network.h"
 #include "snapshot.h"
@@ -17,11 +20,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/uio.h>
+#endif
 #include <time.h>
 #include <unistd.h>
 
-enum { MAGIC = 0x534f4c33, VERSION = NETWORK_PROTOCOL_VERSION, DATAGRAM = 1200, HEADER = NETWORK_PACKET_HEADER, BUTTONS = 11, COMMAND_SIZE = 104, INTERPOLATION_TICKS = 2, REPAIR_GROUP = 255, EVENT_SIZE = 64 };
-typedef enum { HELLO = 1, WELCOME, COMMAND, STATE, LEAVE, REJECT, REPAIR, INPUT_ACK, EVENTS, EVENT_ACK, CHALLENGE, CONNECT } PacketKind;
+enum { MAGIC = 0x534f4c33, VERSION = NETWORK_PROTOCOL_VERSION, DATAGRAM = 1200, HEADER = NETWORK_PACKET_HEADER, STATE_HEADER = NETWORK_STATE_HEADER, STATE_DATA = NETWORK_STATE_DATA, BUTTONS = 11, COMMAND_SIZE = 104, INTERPOLATION_TICKS = 2, REPAIR_GROUP = 255, EVENT_SIZE = 64 };
+typedef enum { HELLO = 1, WELCOME, COMMAND, STATE, LEAVE, REJECT, REPAIR, EVENTS = 9, EVENT_ACK, CHALLENGE, CONNECT } PacketKind;
 typedef enum { HOST, CLIENT } Role;
 typedef enum { DELIVERY_PROTECTED, DELIVERY_CLEAN } Delivery;
 typedef struct {
@@ -130,12 +136,12 @@ static void repair_assembly(Assembly *assembly, size_t group, NetworkStats *stat
             missing[count++] = i;
         }
     if (!count || !assembly->parity_received[group] || (count == 2 && assembly->parity_received[group] != 3)) return;
-    unsigned char residual[2][DATAGRAM - HEADER];
+    unsigned char residual[2][STATE_DATA];
     memcpy(residual, assembly->parity + group * sizeof(residual), sizeof(residual));
     for (size_t fragment = first; fragment < end; ++fragment) {
         if (!assembly->fragments[fragment]) continue;
-        size_t offset = fragment * (DATAGRAM - HEADER), size = assembly->size - offset;
-        if (size > DATAGRAM - HEADER) size = DATAGRAM - HEADER;
+        size_t offset = fragment * STATE_DATA, size = assembly->size - offset;
+        if (size > STATE_DATA) size = STATE_DATA;
         unsigned char coefficient = (unsigned char)(fragment - first + 1);
         for (size_t byte = 0; byte < size; ++byte) {
             unsigned char value = assembly->data[offset + byte];
@@ -145,13 +151,13 @@ static void repair_assembly(Assembly *assembly, size_t group, NetworkStats *stat
     }
     unsigned char a = (unsigned char)(missing[0] - first + 1);
     unsigned char b = count == 2 ? (unsigned char)(missing[1] - first + 1) : 0;
-    for (size_t byte = 0; byte < DATAGRAM - HEADER; ++byte) {
+    for (size_t byte = 0; byte < STATE_DATA; ++byte) {
         unsigned char recovered = count == 2 ? field[inverse[a ^ b]][residual[1][byte] ^ field[b][residual[0][byte]]] :
             (assembly->parity_received[group] & 1 ? residual[0][byte] : field[inverse[a]][residual[1][byte]]);
-        size_t offset = missing[0] * (DATAGRAM - HEADER) + byte;
+        size_t offset = missing[0] * STATE_DATA + byte;
         if (offset < assembly->size) assembly->data[offset] = recovered;
         if (count == 2) {
-            offset = missing[1] * (DATAGRAM - HEADER) + byte;
+            offset = missing[1] * STATE_DATA + byte;
             if (offset < assembly->size) assembly->data[offset] = residual[0][byte] ^ recovered;
         }
     }
@@ -179,21 +185,69 @@ static uint64_t get64(const unsigned char *p) { return (uint64_t)get32(p) << 32 
 static void putfloat(unsigned char *p, float value) { uint32_t bits; memcpy(&bits, &value, 4); put32(p, bits); }
 static float getfloat(const unsigned char *p) { uint32_t bits = get32(p); float value; memcpy(&value, &bits, 4); return value; }
 
-static void send_packet(Network *net, const struct sockaddr_in6 *address, PacketKind kind,
+#if defined(__linux__)
+typedef struct {
+    struct mmsghdr messages[UIO_MAXIOV];
+    struct iovec parts[UIO_MAXIOV][2];
+    unsigned char headers[UIO_MAXIOV][STATE_HEADER];
+    unsigned count;
+} PacketBatch;
+
+static void flush_packets(Network *net, PacketBatch *batch) {
+    unsigned first = 0;
+    while (first < batch->count) {
+        int count = sendmmsg(net->socket, batch->messages + first, batch->count - first, 0);
+        if (count < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)) { ++first; continue; }
+        if (count < 0) fail("sendmmsg");
+        if (!count) abort();
+        for (unsigned i = first; i < first + (unsigned)count; ++i) {
+            size_t size = batch->parts[i][0].iov_len + batch->parts[i][1].iov_len;
+            if (batch->messages[i].msg_len != size) { fprintf(stderr, "UDP datagram was incomplete\n"); abort(); }
+            net->stats.sent_bytes += batch->messages[i].msg_len;
+            ++net->stats.sent_packets;
+        }
+        first += (unsigned)count;
+    }
+    batch->count = 0;
+}
+#else
+typedef void PacketBatch;
+#endif
+
+static void send_packet(Network *net, PacketBatch *batch, const struct sockaddr_in6 *address, PacketKind kind,
     uint64_t token, uint64_t sequence, uint64_t ack, uint32_t map, uint32_t total,
     uint32_t offset, uint64_t delivery, unsigned repairs, const unsigned char *data, size_t size) {
-    unsigned char packet[DATAGRAM];
+    unsigned char storage[DATAGRAM], *packet = storage;
+#if defined(__linux__)
+    if (batch) packet = batch->headers[batch->count];
+#else
+    (void)batch;
+#endif
+    size_t header = kind == STATE || kind == REPAIR ? STATE_HEADER : HEADER;
     put32(packet, MAGIC); put32(packet + 4, VERSION); put32(packet + 8, kind);
     put64(packet + 12, token); put64(packet + 20, sequence); put64(packet + 28, ack);
     put32(packet + 36, map); put32(packet + 40, total); put32(packet + 44, offset);
     put64(packet + 48, delivery); packet[56] = (unsigned char)repairs;
-    if (size) memcpy(packet + HEADER, data, size);
-    ssize_t sent = sendto(net->socket, packet, HEADER + size, 0, (const struct sockaddr *)address, sizeof(*address));
+    if (header == STATE_HEADER) put64(packet + HEADER, net->next_event_id);
+#if defined(__linux__)
+    if (batch) {
+        unsigned index = batch->count++;
+        batch->parts[index][0] = (struct iovec){packet, header};
+        batch->parts[index][1] = (struct iovec){(void *)data, size};
+        batch->messages[index] = (struct mmsghdr){.msg_hdr = {
+            .msg_name = (void *)address, .msg_namelen = sizeof(*address),
+            .msg_iov = batch->parts[index], .msg_iovlen = 2}};
+        if (batch->count == UIO_MAXIOV) flush_packets(net, batch);
+        return;
+    }
+#endif
+    if (size) memcpy(packet + header, data, size);
+    ssize_t sent = sendto(net->socket, packet, header + size, 0, (const struct sockaddr *)address, sizeof(*address));
     if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK || errno == ENOBUFS)) return;
     if (sent < 0) fail("sendto");
     net->stats.sent_bytes += (uint64_t)sent;
     ++net->stats.sent_packets;
-    if ((size_t)sent != HEADER + size) { fprintf(stderr, "UDP datagram was incomplete\n"); abort(); }
+    if ((size_t)sent != header + size) { fprintf(stderr, "UDP datagram was incomplete\n"); abort(); }
 }
 
 static Network *create(Role role, unsigned short port) {
@@ -272,7 +326,7 @@ int network_receive_at(Network *net, Game *game, double now) {
         }
     }
     if (net->role == CLIENT && net->status == NET_CONNECTING && now - net->last_hello >= 1) {
-        send_packet(net, &net->server.address, HELLO, 0, 0, 0, 0, 0, 0, 0, 0,
+        send_packet(net, NULL, &net->server.address, HELLO, 0, 0, 0, 0, 0, 0, 0, 0,
             (unsigned char *)net->name, strlen(net->name) + 1);
         net->last_hello = now;
     }
@@ -300,12 +354,14 @@ int network_receive_at(Network *net, Game *game, double now) {
             fprintf(stderr, "Rejected incompatible UDP packet\n"); continue;
         }
         PacketKind kind = get32(packet + 8);
+        size_t header = kind == STATE || kind == REPAIR ? STATE_HEADER : HEADER;
+        if ((size_t)received < header) continue;
         uint64_t token = get64(packet + 12), sequence = get64(packet + 20), ack = get64(packet + 28);
         uint32_t map = get32(packet + 36), total = get32(packet + 40), offset = get32(packet + 44);
         uint64_t delivery = get64(packet + 48);
         unsigned repairs = packet[56];
-        size_t size = (size_t)received - HEADER;
-        unsigned char *data = packet + HEADER;
+        size_t size = (size_t)received - header;
+        unsigned char *data = packet + header;
         if (net->role == HOST) {
             int slot = -1;
             for (int i = 0; i < ACTOR_COUNT; ++i)
@@ -331,7 +387,7 @@ int network_receive_at(Network *net, Game *game, double now) {
                         if (close(random) != 0) fail("close /dev/urandom");
                         net->admissions[admission] = (Admission){address, challenge, now};
                     }
-                    send_packet(net, &address, CHALLENGE, net->admissions[admission].token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
+                    send_packet(net, NULL, &address, CHALLENGE, net->admissions[admission].token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
                     continue;
                 }
                 if (slot < 0 || token != net->peers[slot].token) {
@@ -347,7 +403,7 @@ int network_receive_at(Network *net, Game *game, double now) {
                             if (i != net->local_actor && !net->peers[i].joined) { slot = i; break; }
                     if (slot < 0) {
                         const unsigned char full[] = "Server is full";
-                        send_packet(net, &address, REJECT, 0, 0, 0, 0, 0, 0, 0, 0, full, sizeof(full));
+                        send_packet(net, NULL, &address, REJECT, 0, 0, 0, 0, 0, 0, 0, 0, full, sizeof(full));
                         continue;
                     }
                     free(net->peers[slot].commands);
@@ -360,7 +416,7 @@ int network_receive_at(Network *net, Game *game, double now) {
                     game_select_team(game, slot, TEAM_NONE);
                 }
                 unsigned char assigned[12]; put32(assigned, (uint32_t)slot); put64(assigned + 4, net->next_event_id);
-                send_packet(net, &address, WELCOME, net->peers[slot].token, 0, 0,
+                send_packet(net, NULL, &address, WELCOME, net->peers[slot].token, 0, 0,
                     (uint32_t)world_map_current, 0, 0, 0, 0, assigned, sizeof(assigned));
                 continue;
             }
@@ -391,9 +447,10 @@ int network_receive_at(Network *net, Game *game, double now) {
                 uint64_t settled = distance < 64 ? valid & (UINT64_MAX << distance) : 0;
                 if (settled) peer->delivery = (peer->receipt_mask & settled) == settled ? DELIVERY_CLEAN : DELIVERY_PROTECTED;
             }
-            Snapshot commands = {0};
-            if (!snapshot_unpack(&commands, data, size)) continue;
-            if (!commands.size || commands.size % COMMAND_SIZE != 0) { free(commands.data); continue; }
+            unsigned char command_data[DATAGRAM - HEADER];
+            Snapshot commands = {.data = command_data};
+            if (!snapshot_unpack_into(commands.data, sizeof(command_data), &commands.size, data, size)) continue;
+            if (!commands.size || commands.size % COMMAND_SIZE != 0) continue;
             for (size_t at = 0; at < commands.size; at += COMMAND_SIZE) {
                 const unsigned char *command = commands.data + at;
                 PendingInput next = {.sequence = get64(command), .view_frame = get64(command + 8),
@@ -433,11 +490,10 @@ int network_receive_at(Network *net, Game *game, double now) {
                 peer->commands[position] = next;
                 ++peer->command_count;
             }
-            free(commands.data);
         } else {
             if (!same_address(&address, &net->server.address)) continue;
             if (kind == CHALLENGE && net->status == NET_CONNECTING && size == 0) {
-                send_packet(net, &net->server.address, CONNECT, token, 0, 0, 0, 0, 0, 0, 0,
+                send_packet(net, NULL, &net->server.address, CONNECT, token, 0, 0, 0, 0, 0, 0, 0,
                     (unsigned char *)net->name, strlen(net->name) + 1);
                 continue;
             }
@@ -463,16 +519,12 @@ int network_receive_at(Network *net, Game *game, double now) {
                 if (distance < 64) net->delivery_mask |= UINT64_C(1) << distance;
             }
             if (kind == LEAVE) { net->status = NET_DISCONNECTED; strcpy(net->message, "Host disconnected"); continue; }
-            if (kind == INPUT_ACK) {
-                if (ack >= net->input_ack) { net->input_ack = ack; net->input_ack_events = sequence; }
-                if (ack > net->sequence) net->sequence = ack;
-                continue;
-            }
             if (kind == EVENTS) {
                 if (size < 5 || get32(data + 1) > DATAGRAM - HEADER) continue;
-                Snapshot decoded = {0};
-                if (!snapshot_unpack(&decoded, data, size)) continue;
-                if (!decoded.size || decoded.size % EVENT_SIZE != 0) { free(decoded.data); continue; }
+                unsigned char event_data[DATAGRAM - HEADER];
+                Snapshot decoded = {.data = event_data};
+                if (!snapshot_unpack_into(decoded.data, sizeof(event_data), &decoded.size, data, size)) continue;
+                if (!decoded.size || decoded.size % EVENT_SIZE != 0) continue;
                 for (size_t at = 0; at < decoded.size; at += EVENT_SIZE) {
                     const unsigned char *entry = decoded.data + at;
                     JournalEvent current = {.id = get64(entry), .tick = get64(entry + 8), .command = get64(entry + 16),
@@ -494,7 +546,6 @@ int network_receive_at(Network *net, Game *game, double now) {
                     net->journal[position] = current;
                     ++net->journal_count;
                 }
-                free(decoded.data);
                 size_t consumed = 0;
                 while (consumed < net->journal_count && net->journal[consumed].id == net->received_event_id + 1) {
                     JournalEvent current = net->journal[consumed++];
@@ -518,38 +569,46 @@ int network_receive_at(Network *net, Game *game, double now) {
                 }
                 net->journal_count -= consumed;
                 if (consumed) memmove(net->journal, net->journal + consumed, net->journal_count * sizeof(*net->journal));
-                send_packet(net, &net->server.address, EVENT_ACK, net->server.token, net->received_event_id, net->completed_frame,
+                send_packet(net, NULL, &net->server.address, EVENT_ACK, net->server.token, net->received_event_id, net->completed_frame,
                     (uint32_t)net->map, 0, 0, 0, 0, NULL, 0);
                 continue;
             }
-            if ((kind != STATE && kind != REPAIR) || map >= world_map_count || sequence <= net->completed_frame || !total || repairs > 2) continue;
-            size_t fragments = ((size_t)total + DATAGRAM - HEADER - 1) / (DATAGRAM - HEADER);
+            if ((kind != STATE && kind != REPAIR) || map >= world_map_count || !total || repairs > 2) continue;
+            size_t fragments = ((size_t)total + STATE_DATA - 1) / STATE_DATA;
             size_t groups = (fragments + REPAIR_GROUP - 1) / REPAIR_GROUP;
-            if (kind == STATE && (offset >= total || size > total - offset || offset % (DATAGRAM - HEADER) != 0 ||
-                size != (total - offset < DATAGRAM - HEADER ? total - offset : DATAGRAM - HEADER))) continue;
-            size_t group_bytes = kind == REPAIR && offset / 2 < groups ? total - (size_t)(offset / 2) * REPAIR_GROUP * (DATAGRAM - HEADER) : 0;
-            if (kind == REPAIR && (offset >= groups * 2 || offset % 2 >= repairs || size != (group_bytes < DATAGRAM - HEADER ? group_bytes : DATAGRAM - HEADER))) continue;
+            if (kind == STATE && (offset >= total || size > total - offset || offset % STATE_DATA != 0 ||
+                size != (total - offset < STATE_DATA ? total - offset : STATE_DATA))) continue;
+            size_t group_bytes = kind == REPAIR && offset / 2 < groups ? total - (size_t)(offset / 2) * REPAIR_GROUP * STATE_DATA : 0;
+            if (kind == REPAIR && (offset >= groups * 2 || offset % 2 >= repairs || size != (group_bytes < STATE_DATA ? group_bytes : STATE_DATA))) continue;
+            uint64_t event_watermark = get64(packet + HEADER);
+            if (ack > net->input_ack) {
+                net->input_ack = ack;
+                net->input_ack_events = event_watermark;
+            } else if (ack == net->input_ack && event_watermark > net->input_ack_events)
+                net->input_ack_events = event_watermark;
+            if (ack > net->sequence) net->sequence = ack;
+            if (sequence <= net->completed_frame) continue;
             Assembly *assembly = &net->assemblies[sequence % (SRC_MAX_OLDPOS + 1)];
             if (sequence < assembly->sequence) continue;
             if (sequence != assembly->sequence) {
                 free(assembly->data); free(assembly->fragments); free(assembly->parity); free(assembly->parity_received);
                 *assembly = (Assembly){.data = malloc(total), .size = total, .sequence = sequence, .ack = ack, .map = map,
-                    .count = ((size_t)total + DATAGRAM - HEADER - 1) / (DATAGRAM - HEADER), .repairs = repairs};
+                    .count = ((size_t)total + STATE_DATA - 1) / STATE_DATA, .repairs = repairs};
                 assembly->fragments = calloc(assembly->count, 1);
-                assembly->parity = calloc(groups * 2, DATAGRAM - HEADER);
+                assembly->parity = calloc(groups * 2, STATE_DATA);
                 assembly->parity_received = calloc(groups, 1);
                 if (!assembly->data || !assembly->fragments || !assembly->parity || !assembly->parity_received) abort();
             }
             if (total != assembly->size || ack != assembly->ack || map != assembly->map || repairs != assembly->repairs) continue;
             size_t group;
             if (kind == STATE) {
-                size_t fragment = offset / (DATAGRAM - HEADER);
+                size_t fragment = offset / STATE_DATA;
                 group = fragment / REPAIR_GROUP;
                 memcpy(assembly->data + offset, data, size);
                 if (!assembly->fragments[fragment]) { assembly->fragments[fragment] = 1; ++assembly->received; }
             } else {
                 group = offset / 2;
-                memcpy(assembly->parity + (size_t)offset * (DATAGRAM - HEADER), data, size);
+                memcpy(assembly->parity + (size_t)offset * STATE_DATA, data, size);
                 assembly->parity_received[group] |= 1u << (offset % 2);
             }
             repair_assembly(assembly, group, &net->stats);
@@ -721,11 +780,19 @@ void network_broadcast(Network *net, const Game *game) {
     typedef struct { uint64_t requested; size_t total, fragments, groups; unsigned char *data, *parity; } Payload;
     Payload payloads[ACTOR_COUNT];
     size_t prepared = 0;
+    typedef struct { uint64_t requested; size_t first, count; Snapshot *packets; } EventPayload;
+    EventPayload event_payloads[ACTOR_COUNT];
+    size_t event_prepared = 0;
+#if defined(__linux__)
+    PacketBatch packets;
+    packets.count = 0;
+    PacketBatch *batch = &packets;
+#else
+    PacketBatch *batch = NULL;
+#endif
     for (int i = 0; i < ACTOR_COUNT; ++i) {
         Peer *peer = &net->peers[i];
         if (!peer->joined) continue;
-        send_packet(net, &peer->address, INPUT_ACK, peer->token, net->next_event_id, peer->applied_sequence,
-            (uint32_t)world_map_current, 0, 0, 0, 0, NULL, 0);
         size_t cached = 0;
         while (cached < prepared && payloads[cached].requested != peer->confirmed_frame) ++cached;
         if (cached == prepared) {
@@ -738,7 +805,7 @@ void network_broadcast(Network *net, const Game *game) {
             }
             size_t total = selected.size + 16;
             if (total > UINT32_MAX) { fprintf(stderr, "Snapshot exceeds the protocol size field\n"); abort(); }
-            size_t fragments = (total + DATAGRAM - HEADER - 1) / (DATAGRAM - HEADER);
+            size_t fragments = (total + STATE_DATA - 1) / STATE_DATA;
             size_t groups = (fragments + REPAIR_GROUP - 1) / REPAIR_GROUP;
             Payload *payload = &payloads[prepared++];
             *payload = (Payload){.requested = peer->confirmed_frame, .total = total, .fragments = fragments, .groups = groups,
@@ -752,14 +819,14 @@ void network_broadcast(Network *net, const Game *game) {
         Payload *payload = &payloads[cached];
         unsigned repairs = peer->delivery == DELIVERY_CLEAN ? 0 : 2;
         if (repairs && !payload->parity) {
-            payload->parity = calloc(payload->groups * 2, DATAGRAM - HEADER);
+            payload->parity = calloc(payload->groups * 2, STATE_DATA);
             if (!payload->parity) abort();
             for (size_t fragment = 0; fragment < payload->fragments; ++fragment) {
                 size_t group = fragment / REPAIR_GROUP;
-                unsigned char *p = payload->parity + group * 2 * (DATAGRAM - HEADER);
-                unsigned char *q = p + DATAGRAM - HEADER;
-                size_t offset = fragment * (DATAGRAM - HEADER), size = payload->total - offset;
-                if (size > DATAGRAM - HEADER) size = DATAGRAM - HEADER;
+                unsigned char *p = payload->parity + group * 2 * STATE_DATA;
+                unsigned char *q = p + STATE_DATA;
+                size_t offset = fragment * STATE_DATA, size = payload->total - offset;
+                if (size > STATE_DATA) size = STATE_DATA;
                 unsigned char coefficient = (unsigned char)(fragment % REPAIR_GROUP + 1);
                 for (size_t byte = 0; byte < size; ++byte) {
                     p[byte] ^= payload->data[offset + byte];
@@ -769,43 +836,66 @@ void network_broadcast(Network *net, const Game *game) {
         }
         net->stats.raw_snapshot_bytes += raw.size;
         net->stats.packed_snapshot_bytes += payload->total;
-        for (size_t offset = 0; offset < payload->total; offset += DATAGRAM - HEADER) {
+        for (size_t offset = 0; offset < payload->total; offset += STATE_DATA) {
             size_t size = payload->total - offset;
-            if (size > DATAGRAM - HEADER) size = DATAGRAM - HEADER;
-            send_packet(net, &peer->address, STATE, peer->token, net->frame, peer->applied_sequence,
+            if (size > STATE_DATA) size = STATE_DATA;
+            send_packet(net, batch, &peer->address, STATE, peer->token, net->frame, peer->applied_sequence,
                 (uint32_t)world_map_current, (uint32_t)payload->total, (uint32_t)offset,
                 ++peer->delivery_sequence, repairs, payload->data + offset, size);
         }
         for (size_t group = 0; group < payload->groups; ++group) {
-            size_t size = payload->total - group * REPAIR_GROUP * (DATAGRAM - HEADER);
-            if (size > DATAGRAM - HEADER) size = DATAGRAM - HEADER;
+            size_t size = payload->total - group * REPAIR_GROUP * STATE_DATA;
+            if (size > STATE_DATA) size = STATE_DATA;
             for (unsigned repair = 0; repair < repairs; ++repair)
-                send_packet(net, &peer->address, REPAIR, peer->token, net->frame, peer->applied_sequence,
+                send_packet(net, batch, &peer->address, REPAIR, peer->token, net->frame, peer->applied_sequence,
                     (uint32_t)world_map_current, (uint32_t)payload->total, (uint32_t)(group * 2 + repair),
                     ++peer->delivery_sequence, repairs,
-                    payload->parity + (group * 2 + repair) * (DATAGRAM - HEADER), size);
+                    payload->parity + (group * 2 + repair) * STATE_DATA, size);
         }
-        size_t event = 0;
-        while (event < net->journal_count && net->journal[event].id <= peer->event_ack) ++event;
-        while (event < net->journal_count) {
-            unsigned char bytes[DATAGRAM - HEADER];
-            size_t size = 0;
-            while (event < net->journal_count && size + EVENT_SIZE + 5 <= sizeof(bytes)) {
-                const JournalEvent *current = &net->journal[event++];
-                unsigned char *out = bytes + size;
-                put64(out, current->id); put64(out + 8, current->tick); put64(out + 16, current->command);
-                put64(out + 24, current->epoch); put32(out + 32, (uint32_t)current->map); put32(out + 36, current->event.kind);
-                putfloat(out + 40, current->event.position.x); putfloat(out + 44, current->event.position.y); putfloat(out + 48, current->event.position.z);
-                put32(out + 52, (uint32_t)current->event.actor); put32(out + 56, (uint32_t)current->event.target); put32(out + 60, current->event.weapon);
-                size += EVENT_SIZE;
+        size_t event_cached = 0;
+        while (event_cached < event_prepared && event_payloads[event_cached].requested != peer->event_ack) ++event_cached;
+        enum { EVENTS_PER_PACKET = (DATAGRAM - HEADER - 5) / EVENT_SIZE };
+        if (event_cached == event_prepared) {
+            size_t event = 0;
+            while (event < net->journal_count && net->journal[event].id <= peer->event_ack) ++event;
+            EventPayload *events = &event_payloads[event_prepared++];
+            *events = (EventPayload){.requested = peer->event_ack, .first = event,
+                .count = (net->journal_count - event + EVENTS_PER_PACKET - 1) / EVENTS_PER_PACKET};
+            events->packets = events->count ? malloc(events->count * sizeof(*events->packets)) : NULL;
+            if (events->count && !events->packets) abort();
+            for (size_t part = 0; part < events->count; ++part) {
+                unsigned char bytes[DATAGRAM - HEADER];
+                size_t size = 0;
+                while (event < net->journal_count && size + EVENT_SIZE + 5 <= sizeof(bytes)) {
+                    const JournalEvent *current = &net->journal[event++];
+                    unsigned char *out = bytes + size;
+                    put64(out, current->id); put64(out + 8, current->tick); put64(out + 16, current->command);
+                    put64(out + 24, current->epoch); put32(out + 32, (uint32_t)current->map); put32(out + 36, current->event.kind);
+                    putfloat(out + 40, current->event.position.x); putfloat(out + 44, current->event.position.y); putfloat(out + 48, current->event.position.z);
+                    put32(out + 52, (uint32_t)current->event.actor); put32(out + 56, (uint32_t)current->event.target); put32(out + 60, current->event.weapon);
+                    size += EVENT_SIZE;
+                }
+                Snapshot event_bytes = {bytes, size};
+                events->packets[part] = snapshot_pack(&event_bytes);
             }
-            Snapshot event_bytes = {bytes, size}, packed = snapshot_pack(&event_bytes);
-            send_packet(net, &peer->address, EVENTS, peer->token, net->journal[event - 1].id, 0,
-                (uint32_t)world_map_current, 0, 0, 0, 0, packed.data, packed.size);
-            free(packed.data);
+        }
+        const EventPayload *events = &event_payloads[event_cached];
+        for (size_t part = 0; part < events->count; ++part) {
+            size_t last = events->first + (part + 1) * EVENTS_PER_PACKET;
+            if (last > net->journal_count) last = net->journal_count;
+            Snapshot packet = events->packets[part];
+            send_packet(net, batch, &peer->address, EVENTS, peer->token, net->journal[last - 1].id, 0,
+                (uint32_t)world_map_current, 0, 0, 0, 0, packet.data, packet.size);
         }
     }
+#if defined(__linux__)
+    flush_packets(net, batch);
+#endif
     for (size_t i = 0; i < prepared; ++i) { free(payloads[i].data); free(payloads[i].parity); }
+    for (size_t i = 0; i < event_prepared; ++i) {
+        for (size_t part = 0; part < event_payloads[i].count; ++part) free(event_payloads[i].packets[part].data);
+        free(event_payloads[i].packets);
+    }
     free(keyframe.data);
 }
 
@@ -846,7 +936,7 @@ void network_send_input(Network *net, Game *game, Input input, WeaponId primary,
         }
         Snapshot raw = {data, size};
         Snapshot packed = snapshot_pack(&raw);
-        send_packet(net, &net->server.address, COMMAND, net->server.token, net->received_delivery, net->completed_frame,
+        send_packet(net, NULL, &net->server.address, COMMAND, net->server.token, net->received_delivery, net->completed_frame,
             (uint32_t)net->map, (uint32_t)(net->delivery_mask >> 32), (uint32_t)net->delivery_mask, 0, 0, packed.data, packed.size);
         free(packed.data);
     }
@@ -872,11 +962,11 @@ void network_send_input(Network *net, Game *game, Input input, WeaponId primary,
 
 void network_close(Network *net) {
     if (net->role == CLIENT && net->status == NET_CONNECTED)
-        send_packet(net, &net->server.address, LEAVE, net->server.token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
+        send_packet(net, NULL, &net->server.address, LEAVE, net->server.token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
     if (net->role == HOST)
         for (int i = 0; i < ACTOR_COUNT; ++i)
             if (net->peers[i].joined)
-                send_packet(net, &net->peers[i].address, LEAVE, net->peers[i].token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
+                send_packet(net, NULL, &net->peers[i].address, LEAVE, net->peers[i].token, 0, 0, 0, 0, 0, 0, 0, NULL, 0);
     if (close(net->socket) != 0) fail("close socket");
     for (int i = 0; i < ACTOR_COUNT; ++i) free(net->peers[i].commands);
     for (int i = 0; i <= SRC_MAX_OLDPOS; ++i) {

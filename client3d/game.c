@@ -275,9 +275,9 @@ void game_step(Game *game, const Input inputs[ACTOR_COUNT]) {
             continue;
         }
         if (actor->spawn_protection_ticks >= 0) --actor->spawn_protection_ticks;
-        movement_step(actor, inputs[i], game->tick);
+        unsigned surface = movement_step(actor, inputs[i], game->tick);
         actor->motion_tick = game->tick + 1;
-        combat_environment(game, i, world_contact_type(actor));
+        combat_environment(game, i, surface);
         if (actor->hit_ticks > 0) --actor->hit_ticks;
         if (actor->life == ALIVE && actor->position.y < world_bounds.min.y - 2 * actor_height(STANDING)) {
             ragdoll_start(actor);

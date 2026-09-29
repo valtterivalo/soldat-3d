@@ -47,13 +47,17 @@ static void projectile_create(Game *game, int owner, WeaponId weapon, Vec3 origi
     };
 }
 
-Vec3 actor_muzzle(const Actor *actor) {
-    Vec3 points[21];
-    actor_pose(actor,points);
+static Vec3 muzzle_from_pose(const Actor *actor, const Vec3 points[21]) {
     Vec3 shoulder=scale(add(points[10],points[11]),.5f);
     Vec3 barrel=pose_muzzle(actor,points);
     WorldHit hit=bullet_trace(shoulder,barrel,actor->team);
     return add(shoulder,scale(sub(barrel,shoulder),hit.fraction));
+}
+
+Vec3 actor_muzzle(const Actor *actor) {
+    Vec3 points[21];
+    actor_pose(actor,points);
+    return muzzle_from_pose(actor,points);
 }
 
 static int accumulate_bink(int accumulated, int bink) {
@@ -199,32 +203,46 @@ void combat_history_enable(Game *game) {
     combat_history_record(game);
 }
 
+typedef enum { BODY_PENDING, BODY_PAST, BODY_MISSING } BodySampleKind;
+typedef struct {
+    Rewind rewind;
+    BodySampleKind kind;
+    const HistoryFrame *a,*b;
+    float fraction;
+} BodySample;
+
 static int historical_body(const Game *game, int target, const WeaponDef *weapon,
-    Rewind rewind, BodyPoint points[HIT_PARTS]) {
+    BodySample *sample, BodyPoint points[HIT_PARTS]) {
     const Actor *actor = &game->actors[target];
     Vec3 bones[21];
-    if (rewind.mode == REWIND_NONE) {
+    if (sample->rewind.mode == REWIND_NONE) {
         actor_pose(actor, bones);
         body_points(actor->life, direction(actor->yaw, actor->pitch), weapon, bones, points);
         return 1;
     }
-    if (!game->history) {
-        fprintf(stderr, "Rendered rewind requires combat history\n");
-        abort();
+    if (sample->kind==BODY_PENDING) {
+        if (!game->history) {
+            fprintf(stderr, "Rendered rewind requires combat history\n");
+            abort();
+        }
+        uint64_t before = sample->rewind.before_tick, after = sample->rewind.after_tick;
+        float fraction = sample->rewind.fraction;
+        uint64_t elapsed = game->tick + 1 - sample->rewind.applied_tick;
+        double advance = (double)(after - before) * fraction + (double)elapsed;
+        if (advance > (double)(after - before)) {
+            uint64_t whole = (uint64_t)floor(advance);
+            before += whole;
+            after = before + (advance > (double)whole);
+            fraction = (float)(advance - whole);
+        } else if (before != after) fraction = (float)((double)fraction + (double)elapsed / (after - before));
+        const HistoryFrame *a = &game->history->frames[before % HISTORY_FRAMES];
+        const HistoryFrame *b = &game->history->frames[after % HISTORY_FRAMES];
+        sample->kind=a->tick==before && b->tick==after ? BODY_PAST : BODY_MISSING;
+        sample->a=a;sample->b=b;sample->fraction=fraction;
     }
-    uint64_t before = rewind.before_tick, after = rewind.after_tick;
-    float fraction = rewind.fraction;
-    uint64_t elapsed = game->tick + 1 - rewind.applied_tick;
-    double advance = (double)(after - before) * fraction + (double)elapsed;
-    if (advance > (double)(after - before)) {
-        uint64_t whole = (uint64_t)floor(advance);
-        before += whole;
-        after = before + (advance > (double)whole);
-        fraction = (float)(advance - whole);
-    } else if (before != after) fraction = (float)((double)fraction + (double)elapsed / (after - before));
-    const HistoryFrame *a = &game->history->frames[before % HISTORY_FRAMES];
-    const HistoryFrame *b = &game->history->frames[after % HISTORY_FRAMES];
-    if (a->tick != before || b->tick != after) return 0;
+    if (sample->kind==BODY_MISSING) return 0;
+    const HistoryFrame *a=sample->a,*b=sample->b;
+    float fraction=sample->fraction;
     const HistoricalActor *left = &a->actors[target], *right = &b->actors[target];
     if (left->spawn_id != actor->spawn_id || right->spawn_id != actor->spawn_id ||
         left->life != actor->life || right->life != actor->life || left->protected || right->protected) return 0;
@@ -290,6 +308,7 @@ Vec3 combat_aim_target(const Game *game, int shooter, Vec3 start, Vec3 end, cons
 
 static void explode(Game *game, Projectile projectile, WeaponId damage_weapon, float radius) {
     const WeaponDef *weapon = &weapons[damage_weapon];
+    BodySample sample={.rewind=projectile.rewind};
     combat_event(game, (GameEvent){EVENT_EXPLOSION, projectile.position,
                                  projectile.owner, -1, projectile.weapon});
     for (int i=0;i<3;++i) {
@@ -304,7 +323,7 @@ static void explode(Game *game, Projectile projectile, WeaponId damage_weapon, f
         Actor *actor = &game->actors[i];
         if (actor->life != ALIVE) continue;
         BodyPoint points[HIT_PARTS];
-        if (!historical_body(game, i, weapon, projectile.rewind, points)) continue;
+        if (!historical_body(game, i, weapon, &sample, points)) continue;
         int nearest = 0;
         float distance = length(sub(projectile.position, points[0].center));
         for (int j = 1; j < SOURCE_PARTS; j++) {
@@ -373,7 +392,10 @@ static void fire_weapon(Game *game, int index, Input input) {
     const WeaponDef *weapon = &weapons[state->id];
     Vec3 forward = direction(actor->yaw, actor->pitch);
     Vec3 right = direction(actor->yaw - 1.57079632679f, 0);
-    Vec3 origin = actor_muzzle(actor);
+    Vec3 bones[21];actor_pose(actor,bones);
+    Vec3 shoulder=scale(add(bones[10],bones[11]),.5f);
+    Vec3 origin = muzzle_from_pose(actor,bones);
+    BodySample sample={.rewind=input.rewind};
     WeaponSpread spread = combat_spread(actor, input.held);
     float deviation = spread.aim_deviation;
     float axial = 1 + (game_random(game) * 2 - 1) * deviation;
@@ -414,9 +436,6 @@ static void fire_weapon(Game *game, int index, Input input) {
         } else if (state->id == CHAINSAW || state->id == FLAMER) {
             muzzle = add(muzzle, scale(velocity, 2));
         }
-        Vec3 bones[21];
-        actor_pose(actor,bones);
-        Vec3 shoulder=scale(add(bones[10],bones[11]),.5f);
         WorldHit obstruction=bullet_trace(shoulder,muzzle,actor->team);
         Vec3 barrel = sub(muzzle, shoulder);
         float clearance = obstruction.fraction;
@@ -424,7 +443,7 @@ static void fire_weapon(Game *game, int index, Input input) {
             const Actor *other = &game->actors[target];
             if (target == index || other->life == INACTIVE || (other->life == ALIVE && other->spawn_protection_ticks >= 0)) continue;
             BodyPoint points[HIT_PARTS];
-            if (!historical_body(game, target, weapon, input.rewind, points)) continue;
+            if (!historical_body(game, target, weapon, &sample, points)) continue;
             for (int part = 0; part < HIT_PARTS; ++part)
                 clearance = fminf(clearance, body_fraction(shoulder,barrel,&points[part],0));
         }
@@ -598,6 +617,7 @@ void combat_step(Game *game, const Input inputs[ACTOR_COUNT]) {
         const WeaponDef *weapon = &weapons[projectile.weapon];
         enum { PROJECTILE_FLYING, PROJECTILE_CONSUMED } disposition = PROJECTILE_FLYING;
         projectile.previous = projectile.position;
+        BodySample sample={.rewind=projectile.rewind};
         for (;;) {
             Vec3 end = add(projectile.position, projectile.velocity);
             WorldHit wall = bullet_trace(projectile.position,end,game->actors[projectile.owner].team);
@@ -615,7 +635,7 @@ void combat_step(Game *game, const Input inputs[ACTOR_COUNT]) {
                     (projectile.hit_mask & (1u << target)) ||
                     (target == projectile.owner && age <= owner_delay)) continue;
                 BodyPoint points[HIT_PARTS];
-                if (!historical_body(game, target, weapon, projectile.rewind, points)) continue;
+                if (!historical_body(game, target, weapon, &sample, points)) continue;
                 for (int part = 0; part < HIT_PARTS; part++) {
                     float contact = body_fraction(projectile.position,projectile.velocity,&points[part],
                         projectile.weapon == FRAGGRENADE ? 1 : 0);

@@ -120,10 +120,7 @@ static void solid_polygon(WorldSolid *solid, const Vec3 *top, unsigned count, fl
     for (unsigned i=0;i<count;++i) {
         solid->vertices[i]=top[i];solid->vertices[i].y=bottom;
         solid->vertices[i+count]=top[i];
-        for (unsigned v=i;v<=i+count;v+=count) {
-            memcpy(solid->color[v],color,4);
-            solid->uv[v][0]=top[i].x/80;solid->uv[v][1]=top[i].z/80;
-        }
+        for (unsigned v=i;v<=i+count;v+=count)memcpy(solid->color[v],color,4);
         solid->faces[0][i]=count-1-i;solid->faces[1][i]=count+i;
         unsigned next=(i+1)%count;
         solid->face_size[i+2]=4;
