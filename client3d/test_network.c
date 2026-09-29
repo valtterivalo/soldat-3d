@@ -753,17 +753,34 @@ int main(void) {
         host.actors[alice].carried_flag==FLAG_NONE,"carrier disconnect drops flag and clears ownership");
     Network *clients[ACTOR_COUNT];
     uint32_t slots = 1;
-    for (int i = 0; i < ACTOR_COUNT - 1; ++i) {
-        clients[i] = network_join("127.0.0.1", network_port(server), "Player");
-        connect_client(server, clients[i], &host, &left);
+    double capacity_now = network_time();
+    for (int i = 0; i < ACTOR_COUNT; ++i) {
+        clients[i] = network_join("127.0.0.1", network_port(server),
+            i == ACTOR_COUNT - 1 ? "Overflow" : "Player");
+        do {
+            network_receive(clients[i], &left);
+            network_receive_at(server, &host, capacity_now);
+            network_receive(clients[i], &left);
+        } while (network_status(clients[i]) == NET_CONNECTING);
+        if (i == ACTOR_COUNT - 1) {
+            check(network_status(clients[i]) == NET_REJECTED, "full server rejects an additional player explicitly");
+            continue;
+        }
         int slot = network_actor(clients[i]);
         check(slot >= 0 && !(slots & (1u << slot)), "32-player capacity assigns each slot once");
         slots |= 1u << slot;
     }
     check(slots == UINT32_MAX, "all original 32 slots supported");
-    clients[ACTOR_COUNT - 1] = network_join("127.0.0.1", network_port(server), "Overflow");
-    connect_client(server, clients[ACTOR_COUNT - 1], &host, &left);
-    check(network_status(clients[ACTOR_COUNT - 1]) == NET_REJECTED, "full server rejects an additional player explicitly");
+    double idle_limit = capacity_now + (double)SRC_DISCONNECTION_TIME / TICK_RATE;
+    network_receive_at(server, &host, idle_limit);
+    for (int i = 0; i < ACTOR_COUNT - 1; ++i)
+        check(network_remote(server, network_actor(clients[i])), "idle player remains connected through the source timeout boundary");
+    network_receive_at(server, &host, idle_limit + 1.0 / TICK_RATE);
+    for (int i = 0; i < ACTOR_COUNT - 1; ++i) {
+        int slot = network_actor(clients[i]);
+        check(!network_remote(server, slot) && host.actors[slot].life == INACTIVE,
+            "source timeout expires every idle player and releases its slot");
+    }
     for (int i = 0; i < ACTOR_COUNT; ++i) network_close(clients[i]);
     network_receive(server, &host); network_close(server);
     game_free(&host); game_free(&left); game_free(&right);
