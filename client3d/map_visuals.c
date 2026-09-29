@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { Vec3 position; Vector2 uv; Color color; } MapVertex;
+typedef struct { Vec3 position; Vector2 uv; Color color; float shade; } MapVertex;
 static Model terrain;
 static Texture2D terrain_texture;
 
@@ -33,6 +33,7 @@ static Texture2D texture_load(const char *path)
         exit(EXIT_FAILURE);
     }
     GenTextureMipmaps(&texture);
+    SetTextureFilter(texture, TEXTURE_FILTER_TRILINEAR);
     SetTextureFilter(texture, TEXTURE_FILTER_ANISOTROPIC_16X);
     SetTextureWrap(texture, TEXTURE_WRAP_REPEAT);
     return texture;
@@ -68,7 +69,6 @@ static void terrain_triangle(PropMesh *mesh, MapVertex a, MapVertex b, MapVertex
     MapVertex *grid=malloc(count*sizeof(*grid));
     if(!grid)abort();
     Vec3 sun=v3(-.35f,.84f,-.41f);sun=scale(sun,1/length(sun));
-    float shade=.58f+.42f*fmaxf(0,dot(normal,sun));
     for(unsigned row=0;row<=steps;++row)for(unsigned col=0;col<=steps-row;++col) {
         float u=(float)row/(float)steps,v=(float)col/(float)steps,w=1-u-v;
         MapVertex vertex={
@@ -77,15 +77,16 @@ static void terrain_triangle(PropMesh *mesh, MapVertex a, MapVertex b, MapVertex
             .color={(unsigned char)(a.color.r*w+b.color.r*u+c.color.r*v),
                 (unsigned char)(a.color.g*w+b.color.g*u+c.color.g*v),
                 (unsigned char)(a.color.b*w+b.color.b*u+c.color.b*v),
-                (unsigned char)(a.color.a*w+b.color.a*u+c.color.a*v)}
+                (unsigned char)(a.color.a*w+b.color.a*u+c.color.a*v)},
+            .shade=a.shade*w+b.shade*u+c.shade*v
         };
         Vec3 start=add(vertex.position,scale(normal,.1f));
         WorldHit shadow=world_trace_for(start,add(start,scale(sun,reach)),v3(0,0,0),
             (WorldQuery){WORLD_TRACE_LIGHT,0,WORLD_NO_FLAG});
         if(shadow.box>=0) {
-            vertex.color.r=(unsigned char)((float)vertex.color.r*.58f/shade);
-            vertex.color.g=(unsigned char)((float)vertex.color.g*.58f/shade);
-            vertex.color.b=(unsigned char)((float)vertex.color.b*.58f/shade);
+            vertex.color.r=(unsigned char)((float)vertex.color.r*.58f/vertex.shade);
+            vertex.color.g=(unsigned char)((float)vertex.color.g*.58f/vertex.shade);
+            vertex.color.b=(unsigned char)((float)vertex.color.b*.58f/vertex.shade);
         }
         size_t index=(size_t)row*(2*(size_t)steps+3-row)/2+col;
         grid[index]=vertex;
@@ -124,6 +125,14 @@ static Vec3 prop_point(const WorldProp *prop, Vec3 p)
     return add(prop->position,v3(c*x+s*z,y,-s*x+c*z));
 }
 
+static Vec3 prop_local(const WorldProp *prop,Vec3 position)
+{
+    Vec3 delta=sub(position,prop->position);float c=cosf(prop->yaw),s=sinf(prop->yaw);
+    return v3((delta.x*c-delta.z*s)/prop->scale_x+(float)prop->width*.5f,
+        (float)prop->height-delta.y/prop->scale_y,
+        (delta.x*s+delta.z*c)/((fabsf(prop->scale_x)+fabsf(prop->scale_y))*.5f));
+}
+
 static void prop_triangle(PropMesh *mesh, const WorldProp *prop,
     Vec3 a, Vec3 b, Vec3 c, Color color)
 {
@@ -133,15 +142,9 @@ static void prop_triangle(PropMesh *mesh, const WorldProp *prop,
         if (!vertices) abort();
         mesh->vertices = vertices;
     }
+    if(prop->scale_x*prop->scale_y>0){Vec3 swap=b;b=c;c=swap;}
     Vec3 local[] = {a, b, c};
     Vec3 world[] = {prop_point(prop, a), prop_point(prop, b), prop_point(prop, c)};
-    Vector3 edge_a = {world[1].x-world[0].x, world[1].y-world[0].y, world[1].z-world[0].z};
-    Vector3 edge_b = {world[2].x-world[0].x, world[2].y-world[0].y, world[2].z-world[0].z};
-    Vector3 normal = Vector3Normalize(Vector3CrossProduct(edge_a, edge_b));
-    float light = 0.76f + 0.24f * fabsf(Vector3DotProduct(normal, (Vector3){-.35f,.84f,-.41f}));
-    color.r = (unsigned char)((float)color.r * light);
-    color.g = (unsigned char)((float)color.g * light);
-    color.b = (unsigned char)((float)color.b * light);
     const char *name=world_scenery[prop->style-1];
     Vec3 ab=sub(b,a),ac=sub(c,a);
     Vector3 local_normal=Vector3CrossProduct((Vector3){ab.x,ab.y,ab.z},(Vector3){ac.x,ac.y,ac.z});
@@ -155,7 +158,7 @@ static void prop_triangle(PropMesh *mesh, const WorldProp *prop,
             float center=Clamp(local[i].y/(float)prop->height,.08f,.92f);
             uv.y=center+.15f*local[i].z/(float)prop->width;
         }
-        mesh->vertices[mesh->count++] = (MapVertex){world[i],uv,color};
+        mesh->vertices[mesh->count++] = (MapVertex){world[i],uv,color,1};
     }
 }
 
@@ -193,8 +196,8 @@ static void prop_box(PropMesh *mesh, const WorldProp *prop, Vec3 lo, Vec3 hi, Co
         {{lo.x,hi.y,lo.z},{hi.x,hi.y,lo.z},{hi.x,hi.y,hi.z},{lo.x,hi.y,hi.z}}
     };
     for (int i=0;i<6;++i) {
-        prop_triangle(mesh,prop,faces[i][0],faces[i][1],faces[i][2],color);
-        prop_triangle(mesh,prop,faces[i][0],faces[i][2],faces[i][3],color);
+        prop_triangle(mesh,prop,faces[i][0],faces[i][2],faces[i][1],color);
+        prop_triangle(mesh,prop,faces[i][0],faces[i][3],faces[i][2],color);
     }
 }
 
@@ -215,6 +218,141 @@ static void prop_rock(PropMesh *mesh, const WorldProp *prop,
             }
             if (ring>0) prop_triangle(mesh,prop,p[0],p[1],p[2],color);
             if (ring<5) prop_triangle(mesh,prop,p[0],p[2],p[3],color);
+        }
+    }
+}
+
+static int foliage_art(const char *name)
+{
+    return !strncmp(name,"foliage",7) || !strncmp(name,"bush",4) ||
+        !strncmp(name,"junglebush",10) || !strncmp(name,"jungleflora",11);
+}
+
+static Color prop_sample(const SourceArt *source,const WorldProp *prop,float u,float v)
+{
+    float nearest=INFINITY;Color color={0};
+    for(int y=0;y<source->height;++y)for(int x=0;x<source->width;++x) {
+        Color sample=source->pixels[y*source->width+x];if(sample.a<128)continue;
+        float dx=((float)x+.5f)/(float)source->width-u,dy=((float)y+.5f)/(float)source->height-v;
+        float distance=dx*dx+dy*dy;if(distance>=nearest)continue;
+        nearest=distance;color=sample;
+    }
+    color.r=(unsigned char)((unsigned)color.r*prop->color[0]/255);
+    color.g=(unsigned char)((unsigned)color.g*prop->color[1]/255);
+    color.b=(unsigned char)((unsigned)color.b*prop->color[2]/255);
+    color.a=255;return color;
+}
+
+static void prop_leaf(PropMesh *mesh,const WorldProp *prop,Vec3 base,float angle,float rise,float size,Color color)
+{
+    Vec3 axis=v3(cosf(angle),rise,sinf(angle));axis=scale(axis,1/length(axis));
+    Vec3 across=v3(-sinf(angle),0,cosf(angle));
+    Vec3 normal=v3(axis.y*across.z,axis.z*across.x-axis.x*across.z,-axis.y*across.x);
+    Vec3 rings[6][4];size_t first=mesh->count;
+    for(unsigned ring=0;ring<6;++ring) {
+        float t=(float)ring/5,bend=ring==0 || ring==5 ? 0 : sinf(PI*t);
+        Vec3 center=add(base,add(scale(axis,size*t),scale(normal,size*.18f*bend)));
+        float width=size*.3f*powf(bend,.85f),thickness=width*.09f;
+        if(ring==0 || ring==5)width=thickness=0;
+        rings[ring][0]=add(center,scale(across,width));
+        rings[ring][1]=add(center,scale(normal,thickness));
+        rings[ring][2]=sub(center,scale(across,width));
+        rings[ring][3]=sub(center,scale(normal,thickness));
+    }
+    for(unsigned ring=0;ring<5;++ring)for(unsigned side=0;side<4;++side) {
+        unsigned next=(side+1)%4;
+        Color surface=color;
+        float tint=side<2 ? 1 : .82f;
+        surface.r=(unsigned char)((float)surface.r*tint);
+        surface.g=(unsigned char)((float)surface.g*tint);
+        surface.b=(unsigned char)((float)surface.b*tint);
+        if(ring>0)prop_triangle(mesh,prop,rings[ring][side],rings[ring][next],rings[ring+1][next],surface);
+        if(ring<4)prop_triangle(mesh,prop,rings[ring][side],rings[ring+1][next],rings[ring+1][side],surface);
+    }
+    for(size_t i=first;i<mesh->count;++i) {
+        Vec3 local=sub(prop_local(prop,mesh->vertices[i].position),base);
+        float t=dot(local,axis)/size;
+        float light=.83f+.2f*sinf(PI*t)+.12f*(1-fabsf(dot(local,across))/(size*.3f));
+        Color *surface=&mesh->vertices[i].color;
+        surface->r=(unsigned char)fminf(255,(float)surface->r*light);
+        surface->g=(unsigned char)fminf(255,(float)surface->g*light);
+        surface->b=(unsigned char)fminf(255,(float)surface->b*light);
+    }
+}
+
+static void prop_foliage(PropMesh *mesh,const WorldProp *prop,const SourceArt *source)
+{
+    float w=(float)prop->width,h=(float)prop->height;
+    unsigned stems=(unsigned)ceilf(w/(h*.8f));
+    for(unsigned stem=0;stem<stems;++stem) {
+        float x=w*((float)stem+.5f)/(float)stems;
+        int column=(int)(x*(float)source->width/w),top=0;
+        while(top<source->height && source->pixels[top*source->width+column].a<128)++top;
+        if(top==source->height)continue;
+        float height=h*(1-(float)top/(float)source->height),phase=(float)stem*2.399963f;
+        Vec3 base=v3(x,h,sinf(phase)*height*.12f);
+        Vec3 tip=add(base,v3(cosf(phase)*height*.08f,-height*.82f,sinf(phase)*height*.1f));
+        Color stalk=prop_sample(source,prop,x/w,.85f);
+        stalk.r=(unsigned char)((float)stalk.r*.6f);stalk.g=(unsigned char)((float)stalk.g*.55f);stalk.b=(unsigned char)((float)stalk.b*.45f);
+        prop_tube(mesh,prop,base,tip,height*.014f,height*.006f,stalk,6);
+        for(unsigned level=0;level<4;++level)for(unsigned leaf=0;leaf<3;++leaf) {
+            float t=.12f+(float)level*.235f;
+            float angle=phase+(float)level*2.399963f+(float)leaf*2*PI/3;
+            Vec3 node=add(base,scale(sub(tip,base),t));
+            float size=height*(.48f-.06f*(float)level);
+            Vec3 attachment=add(node,v3(cosf(angle)*height*.07f,-height*.03f,sinf(angle)*height*.07f));
+            prop_tube(mesh,prop,node,attachment,height*.005f,height*.003f,stalk,5);
+            Color color=prop_sample(source,prop,Clamp(x/w+cosf(angle)*size/w,0,1),1-t);
+            prop_leaf(mesh,prop,attachment,angle,-.1f-(float)level*.15f,size,color);
+        }
+    }
+}
+
+static void prop_sandbags(PropMesh *mesh,const WorldProp *prop,const SourceArt *source,Color color)
+{
+    float w=(float)prop->width,h=(float)prop->height;
+    unsigned rows=source->height<=30 ? 1 : (unsigned)ceilf((float)source->height/16);
+    float height=h/(float)rows;
+    unsigned columns=rows==1 ? 1 : (unsigned)ceilf(w/(height*2.5f));float width=w/(float)columns;
+    for(unsigned row=0;row<rows;++row) {
+        unsigned stagger=(row&1) && columns>1,count=columns+stagger;
+        for(unsigned column=0;column<count;++column) {
+            float extent=stagger && (column==0 || column+1==count) ? width*.5f : width;
+            float x=stagger ? column==0 ? width*.25f : column+1==count ? w-width*.25f : (float)column*width : width*((float)column+.5f);
+            float y=h-height*((float)row+.5f);
+            int sx=(int)(x*(float)source->width/w),sy=(int)(y*(float)source->height/h);
+            if(source->pixels[sy*source->width+sx].a<128)continue;
+            float phase=(float)(row*7+column)*2.399963f;
+            Vec3 center=v3(x,y,sinf(phase)*height*.09f),radius=v3(extent*.52f,height*.59f,height*.63f);
+            float luminance=-1;Vector2 uv={0};
+            for(int py=0;py<source->height;++py)for(int px=0;px<source->width;++px) {
+                if(fabsf(((float)px+.5f)*w/(float)source->width-x)>extent*.4f ||
+                    fabsf(((float)py+.5f)*h/(float)source->height-y)>height*.35f)continue;
+                Color sample=source->pixels[py*source->width+px];if(sample.a<128)continue;
+                float value=(float)sample.r*.2126f+(float)sample.g*.7152f+(float)sample.b*.0722f;
+                if(value<=luminance)continue;
+                luminance=value;uv=(Vector2){((float)px+.5f)/(float)source->width,((float)py+.5f)/(float)source->height};
+            }
+            size_t first=mesh->count;
+            for(unsigned ring=0;ring<6;++ring)for(unsigned slice=0;slice<12;++slice) {
+                const unsigned corners[4][2]={{0,0},{0,1},{1,1},{1,0}};
+                Vec3 points[4];
+                for(unsigned k=0;k<4;++k) {
+                    unsigned latitude_index=ring+corners[k][0],longitude_index=(slice+corners[k][1])%12;
+                    float latitude=PI*(float)latitude_index/6,longitude=2*PI*(float)longitude_index/12;
+                    float radial=latitude_index==0 || latitude_index==6 ? 0 : sinf(latitude);
+                    float a=radial*cosf(longitude),b=cosf(latitude),c=radial*sinf(longitude);
+                    Vec3 point=v3(radius.x*copysignf(powf(fabsf(a),.56f),a),radius.y*copysignf(powf(fabsf(b),.72f),b),radius.z*copysignf(powf(fabsf(c),.56f),c));
+                    float turn=.045f*sinf(phase);
+                    points[k]=add(center,v3(point.x*cosf(turn)+point.z*sinf(turn),point.y,-point.x*sinf(turn)+point.z*cosf(turn)));
+                }
+                if(ring>0)prop_triangle(mesh,prop,points[0],points[1],points[2],color);
+                if(ring<5)prop_triangle(mesh,prop,points[0],points[2],points[3],color);
+            }
+            for(size_t i=first;i<mesh->count;++i) {
+                Vec3 local=sub(prop_local(prop,mesh->vertices[i].position),center);
+                mesh->vertices[i].uv=(Vector2){uv.x+local.x/w*.35f,uv.y+(local.y*.65f+local.z*.35f)/h*.35f};
+            }
         }
     }
 }
@@ -344,21 +482,44 @@ static void prop_inflate(PropMesh *mesh, const WorldProp *prop, const SourceArt 
     float thickness=.3f*fminf((float)prop->width,(float)prop->height);
     const int offsets[4][2]={{0,0},{1,0},{1,1},{0,1}};
     for (int y=0;y<rows;++y) for (int x=0;x<columns;++x) {
-        Vec3 front[4],back[4];int volume=0;
+        Vec3 front[4];int volume=0;
         for (int v=0;v<4;++v) {
             int column=x+offsets[v][0],row=y+offsets[v][1];
             int d=distance[row*(columns+1)+column];volume+=d;
             float z=thickness*sqrtf((float)d/(float)maximum);
             front[v]=v3((float)prop->width*(float)column/(float)columns,(float)prop->height*(float)row/(float)rows,z);
-            back[v]=front[v];back[v].z=-z;
         }
         if (!volume) continue;
-        prop_triangle(mesh,prop,front[0],front[1],front[2],color);
-        prop_triangle(mesh,prop,front[0],front[2],front[3],color);
-        prop_triangle(mesh,prop,back[2],back[1],back[0],color);
-        prop_triangle(mesh,prop,back[3],back[2],back[0],color);
+        const unsigned triangles[2][3]={{0,1,2},{0,2,3}};
+        for(unsigned t=0;t<2;++t) {
+            Vec3 contour[4];unsigned vertices=0;
+            for(unsigned k=0;k<3;++k) {
+                Vec3 a=front[triangles[t][k]],b=front[triangles[t][(k+1)%3]];
+                if(a.z>0)contour[vertices++]=a;
+                if((a.z>0)!=(b.z>0)) {
+                    Vec3 edge=scale(add(a,b),.5f);edge.z=0;
+                    contour[vertices++]=edge;
+                }
+            }
+            for(unsigned k=1;k+1<vertices;++k) {
+                Vec3 a=contour[0],b=contour[k],c=contour[k+1];
+                prop_triangle(mesh,prop,a,b,c,color);
+                a.z=-a.z;b.z=-b.z;c.z=-c.z;
+                prop_triangle(mesh,prop,c,b,a,color);
+            }
+        }
     }
     free(distance);
+}
+
+typedef struct { Vec3 position; Vector3 normal; size_t index; } VertexNormal;
+
+static int vertex_normal_order(const void *left,const void *right)
+{
+    const VertexNormal *a=left,*b=right;
+    if(a->position.x!=b->position.x)return a->position.x<b->position.x ? -1 : 1;
+    if(a->position.y!=b->position.y)return a->position.y<b->position.y ? -1 : 1;
+    return a->position.z==b->position.z ? 0 : a->position.z<b->position.z ? -1 : 1;
 }
 
 static int map_face_banded(const WorldSolid *solid,unsigned face)
@@ -393,24 +554,77 @@ void map_visuals_init(void)
         ImageColorReplace(&image,(Color){0,255,0,255},BLANK);
         art[i].pixels=LoadImageColors(image);
         art[i].width=image.width;art[i].height=image.height;
-        uint64_t red=0,green=0,blue=0,opaque=0;
         size_t count=(size_t)image.width*(size_t)image.height;
-        for (size_t p=0;p<count;++p) if (art[i].pixels[p].a>127) {
-            red+=art[i].pixels[p].r;green+=art[i].pixels[p].g;blue+=art[i].pixels[p].b;++opaque;
-        }
-        Color average={(unsigned char)(red/opaque),(unsigned char)(green/opaque),(unsigned char)(blue/opaque),255};
-        Color *pixels=image.data;
-        for (size_t p=0;p<count && art[i].kind==SCENERY_OPAQUE;++p) {
-            if (pixels[p].a<128) pixels[p]=average;
-            pixels[p].a=255;
+        if(art[i].kind==SCENERY_OPAQUE) {
+            size_t *queue=malloc(count*sizeof(*queue));if(!queue)abort();
+            Color *pixels=image.data;
+            size_t first=0,last=0;
+            for(size_t p=0;p<count;++p)if(pixels[p].a>127){pixels[p].a=255;queue[last++]=p;}
+            while(first<last) {
+                size_t p=queue[first++],x=p%(size_t)image.width;
+                size_t neighbors[4],n=0;
+                if(x>0)neighbors[n++]=p-1;
+                if(x+1<(size_t)image.width)neighbors[n++]=p+1;
+                if(p>=(size_t)image.width)neighbors[n++]=p-(size_t)image.width;
+                if(p+(size_t)image.width<count)neighbors[n++]=p+(size_t)image.width;
+                for(size_t k=0;k<n;++k)if(pixels[neighbors[k]].a<128) {
+                    pixels[neighbors[k]]=pixels[p];queue[last++]=neighbors[k];
+                }
+            }
+            free(queue);
         }
         art[i].texture=LoadTextureFromImage(image);
         UnloadImage(image);
         if (!IsTextureValid(art[i].texture)) abort();
         GenTextureMipmaps(&art[i].texture);
+        SetTextureFilter(art[i].texture,TEXTURE_FILTER_TRILINEAR);
         SetTextureFilter(art[i].texture,TEXTURE_FILTER_ANISOTROPIC_16X);
         SetTextureWrap(art[i].texture,TEXTURE_WRAP_CLAMP);
     }
+    typedef struct { Vector3 normal; Color color; } TerrainCorner;
+    TerrainCorner (*corners)[8]=calloc(world_solid_count,sizeof(*corners));
+    VertexNormal *normals=malloc(world_solid_count*8*sizeof(*normals));
+    if(!corners || !normals)abort();
+    size_t normal_count=0;
+    for(size_t p=0;p<world_solid_count;++p) {
+        const WorldSolid *solid=&world_solids[p];
+        if(solid->texture!=WORLD_TERRAIN || solid->visible_faces!=2 || solid->poly_type)continue;
+        unsigned count=solid->face_size[1];
+        Vec3 a=solid->vertices[solid->faces[1][0]],b=solid->vertices[solid->faces[1][1]],c=solid->vertices[solid->faces[1][2]];
+        Vec3 ab=sub(b,a),ac=sub(c,a);
+        Vector3 normal=Vector3Normalize(Vector3CrossProduct((Vector3){ab.x,ab.y,ab.z},(Vector3){ac.x,ac.y,ac.z}));
+        if(normal.y<0)normal=Vector3Negate(normal);
+        for(unsigned k=0;k<count;++k) {
+            Vec3 position=solid->vertices[solid->faces[1][k]];
+            Vec3 u=sub(solid->vertices[solid->faces[1][(k+1)%count]],position);
+            Vec3 v=sub(solid->vertices[solid->faces[1][(k+count-1)%count]],position);
+            float angle=atan2f(Vector3Length(Vector3CrossProduct((Vector3){u.x,u.y,u.z},(Vector3){v.x,v.y,v.z})),dot(u,v));
+            normals[normal_count++]=(VertexNormal){position,Vector3Scale(normal,angle),p*8+k};
+        }
+    }
+    qsort(normals,normal_count,sizeof(*normals),vertex_normal_order);
+    for(size_t first=0;first<normal_count;) {
+        size_t end=first+1;
+        while(end<normal_count && !vertex_normal_order(&normals[first],&normals[end]))++end;
+        for(size_t v=first;v<end;++v) {
+            Vector3 face=Vector3Normalize(normals[v].normal),normal={0},color={0};
+            float weight=0;
+            for(size_t other=first;other<end;++other) {
+                Vector3 adjacent=normals[other].normal;
+                if(Vector3DotProduct(face,Vector3Normalize(adjacent))<=.2f)continue;
+                size_t p=normals[other].index/8,k=normals[other].index%8;
+                const unsigned char *source=world_solids[p].color[world_solids[p].faces[1][k]];
+                float angle=Vector3Length(adjacent);weight+=angle;
+                normal=Vector3Add(normal,adjacent);
+                color=Vector3Add(color,Vector3Scale((Vector3){source[0],source[1],source[2]},angle));
+            }
+            color=Vector3Scale(color,1/weight);
+            corners[normals[v].index/8][normals[v].index%8]=(TerrainCorner){Vector3Normalize(normal),
+                {(unsigned char)color.x,(unsigned char)color.y,(unsigned char)color.z,255}};
+        }
+        first=end;
+    }
+    free(normals);
     PropMesh terrain_build={0};
     float reach=2*length(sub(world_bounds.max,world_bounds.min));
     for (size_t p=0;p<world_solid_count;++p) {
@@ -425,7 +639,6 @@ void map_visuals_init(void)
             Vec3 other=sub(solid->vertices[solid->faces[face][2]],a);
             Vector3 normal=Vector3Normalize(Vector3CrossProduct((Vector3){edge.x,edge.y,edge.z},(Vector3){other.x,other.y,other.z}));
             if(dot(v3(normal.x,normal.y,normal.z),sub(center,a))>0)normal=Vector3Negate(normal);
-            float shade=.58f+.42f*fmaxf(0,Vector3DotProduct(normal,(Vector3){-.35f,.84f,-.41f}));
             for (unsigned k=0;k<solid->face_size[face];++k) {
                 unsigned v=solid->faces[face][k];
                 Vec3 position=solid->vertices[v];
@@ -435,7 +648,10 @@ void map_visuals_init(void)
                 else if (fabsf(normal.x)>=fabsf(normal.z))
                     uv=(Vector2){position.z/80,position.y/80};
                 else uv=(Vector2){position.x/80,position.y/80};
-                Color color=map_color(solid->color[v]);
+                TerrainCorner corner=solid->visible_faces==2 && solid->poly_type==0 ? corners[p][k] :
+                    (TerrainCorner){normal,map_color(solid->color[v])};
+                float shade=.58f+.42f*fmaxf(0,Vector3DotProduct(corner.normal,Vector3Normalize((Vector3){-.35f,.84f,-.41f})));
+                Color color=corner.color;
                 color.r=(unsigned char)((float)color.r*shade);
                 color.g=(unsigned char)((float)color.g*shade);
                 color.b=(unsigned char)((float)color.b*shade);
@@ -454,7 +670,7 @@ void map_visuals_init(void)
                     color.g=(unsigned char)((float)color.g*(1-alpha)+(float)sample.g*(float)prop->color[1]/255*alpha);
                     color.b=(unsigned char)((float)color.b*(1-alpha)+(float)sample.b*(float)prop->color[2]/255*alpha);
                 }
-                vertices[k]=(MapVertex){position,uv,color};
+                vertices[k]=(MapVertex){position,uv,color,shade};
             }
             if(map_face_banded(solid,face)) {
                 MapVertex soil[2],crest[2];
@@ -481,6 +697,7 @@ void map_visuals_init(void)
                 terrain_triangle(&terrain_build,vertices[0],vertices[k],vertices[k+1],v3(normal.x,normal.y,normal.z),reach);
         }
     }
+    free(corners);
     Mesh mesh={0};
     mesh.vertexCount=(int)terrain_build.count;
     mesh.triangleCount=mesh.vertexCount/3;
@@ -506,6 +723,10 @@ void map_visuals_init(void)
         float w=(float)prop->width,h=(float)prop->height;
         if (!strncmp(name,"grass",5)) {
             prop_grass(out,prop,source,(int)i);
+        } else if(foliage_art(name)) {
+            prop_foliage(out,prop,source);
+        } else if(!strncmp(name,"sandbags",8)) {
+            prop_sandbags(out,prop,source,color);
         } else if (!strncmp(name,"barrel",6)) {
             float r=w*.46f;
             prop_tube(out,prop,v3(w*.5f,h*.06f,0),v3(w*.5f,h*.94f,0),r,r,color,16);
@@ -553,6 +774,32 @@ void map_visuals_init(void)
         UnloadImageColors(art[i].pixels);
         art[i].pixels=NULL;
         if (art[i].kind==SCENERY_LIGHT) continue;
+        VertexNormal *normals=malloc(build[i].count*sizeof(*normals));if(!normals)abort();
+        for(size_t v=0;v<build[i].count;v+=3) {
+            Vec3 a=build[i].vertices[v].position,b=build[i].vertices[v+1].position,c=build[i].vertices[v+2].position;
+            Vec3 ab=sub(b,a),ac=sub(c,a);
+            Vector3 normal=Vector3CrossProduct((Vector3){ab.x,ab.y,ab.z},(Vector3){ac.x,ac.y,ac.z});
+            for(size_t k=0;k<3;++k)normals[v+k]=(VertexNormal){build[i].vertices[v+k].position,normal,v+k};
+        }
+        qsort(normals,build[i].count,sizeof(*normals),vertex_normal_order);
+        Vector3 sun=Vector3Normalize((Vector3){-.35f,.84f,-.41f});
+        for(size_t first=0;first<build[i].count;) {
+            size_t end=first+1;
+            while(end<build[i].count && !vertex_normal_order(&normals[first],&normals[end]))++end;
+            for(size_t v=first;v<end;++v) {
+                Vector3 face=Vector3Normalize(normals[v].normal),normal={0};
+                for(size_t other=first;other<end;++other)
+                    if(Vector3DotProduct(face,Vector3Normalize(normals[other].normal))>.55f)
+                        normal=Vector3Add(normal,normals[other].normal);
+                float light=.72f+.28f*fmaxf(0,Vector3DotProduct(Vector3Normalize(normal),sun));
+                Color *color=&build[i].vertices[normals[v].index].color;
+                color->r=(unsigned char)((float)color->r*light);
+                color->g=(unsigned char)((float)color->g*light);
+                color->b=(unsigned char)((float)color->b*light);
+            }
+            first=end;
+        }
+        free(normals);
         Mesh prop={0};
         prop.vertexCount=(int)build[i].count;
         prop.triangleCount=prop.vertexCount/3;
@@ -565,7 +812,7 @@ void map_visuals_init(void)
             mesh_triangle(&prop,&n,build[i].vertices[v],build[i].vertices[v+1],build[i].vertices[v+2]);
         UploadMesh(&prop,false);
         props[i]=LoadModelFromMesh(prop);
-        if (strncmp(world_scenery[i],"grass",5))
+        if (strncmp(world_scenery[i],"grass",5) && !foliage_art(world_scenery[i]))
             props[i].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture=art[i].texture;
         free(build[i].vertices);
     }
@@ -588,8 +835,12 @@ void map_visuals_scenery(void)
 {
     rlEnableDepthMask();
     rlDisableBackfaceCulling();
-    for (size_t i=0;i<world_scenery_count;++i)
-        if (art[i].kind==SCENERY_OPAQUE) DrawModel(props[i],(Vector3){0,0,0},1,WHITE);
+    for (size_t i=0;i<world_scenery_count;++i) if (art[i].kind==SCENERY_OPAQUE) {
+        if(foliage_art(world_scenery[i]) || !strncmp(world_scenery[i],"sandbags",8)) rlEnableBackfaceCulling();
+        else rlDisableBackfaceCulling();
+        DrawModel(props[i],(Vector3){0,0,0},1,WHITE);
+    }
+    rlDisableBackfaceCulling();
     rlDisableDepthMask();
     for (size_t i=0;i<world_scenery_count;++i)
         if (art[i].kind==SCENERY_MIST) DrawModel(props[i],(Vector3){0,0,0},1,WHITE);

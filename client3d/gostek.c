@@ -22,10 +22,14 @@ typedef struct InflatedMesh {
     MeshPart part;
     struct InflatedMesh *next;
 } InflatedMesh;
+typedef struct { float top,bottom; int previous,next; } ArtSpan;
+typedef enum { ART_BEVELED,ART_ROUND } ArtProfile;
 typedef struct {
     Texture2D texture;
     int columns, vertical;
-    float *top, *bottom;
+    ArtProfile profile;
+    int *offsets;
+    ArtSpan *spans;
     InflatedMesh *meshes;
 } InflatedArt;
 typedef struct {
@@ -80,7 +84,9 @@ static Texture2D load_art(const char *directory, const char *name) {
     if (written < 0 || (size_t)written >= sizeof(path)) abort();
     Texture2D texture = LoadTexture(path);
     if (texture.id == 0) { fprintf(stderr,"Cannot load Soldat texture %s\n",path); exit(EXIT_FAILURE); }
+    GenTextureMipmaps(&texture);
     SetTextureFilter(texture, TEXTURE_FILTER_POINT);
+    rlTextureParameters(texture.id,RL_TEXTURE_MIN_FILTER,RL_TEXTURE_FILTER_NEAREST_MIP_LINEAR);
     return texture;
 }
 
@@ -92,20 +98,59 @@ static InflatedArt inflate_art(const char *name) {
     if (!image.data) { fprintf(stderr,"Cannot load Soldat geometry source %s\n",path); exit(EXIT_FAILURE); }
     Color *pixels = LoadImageColors(image);
     int vertical=strcmp(name,"bow")==0 || strcmp(name,"bow-s")==0;
-    InflatedArt art = {.texture=LoadTextureFromImage(image),.columns=vertical?image.height:image.width,.vertical=vertical};
+    InflatedArt art = {.columns=vertical?image.height:image.width,.vertical=vertical,
+        .profile=!strcmp(name,"frag-grenade") || !strcmp(name,"law")?ART_ROUND:ART_BEVELED};
     int rows=vertical?image.width:image.height;
-    art.top = malloc(sizeof(float) * (size_t)art.columns * 2);
-    if (!art.top) abort();
-    art.bottom = art.top + art.columns;
+    art.offsets=malloc(((size_t)art.columns+1)*sizeof(*art.offsets));
+    if (!art.offsets) abort();
+    size_t count=0,capacity=0;
     for (int x=0;x<art.columns;x++) {
-        art.top[x]=(float)rows;
-        art.bottom[x]=0;
-        for (int y=0;y<rows;y++) if (pixels[(vertical?x:y)*image.width+(vertical?y:x)].a>32) {
-            art.top[x]=fminf(art.top[x],(float)y);
-            art.bottom[x]=fmaxf(art.bottom[x],(float)y+1);
+        art.offsets[x]=(int)count;
+        for (int y=0;y<rows;) {
+            if (pixels[(vertical?x:y)*image.width+(vertical?y:x)].a<=32) { y++;continue; }
+            int top=y++;
+            while (y<rows && pixels[(vertical?x:y)*image.width+(vertical?y:x)].a>32) y++;
+            if (count==capacity) {
+                capacity=capacity?capacity*2:64;
+                art.spans=realloc(art.spans,capacity*sizeof(*art.spans));
+                if (!art.spans) abort();
+            }
+            art.spans[count++]=(ArtSpan){(float)top,(float)y,-1,-1};
         }
     }
+    art.offsets[art.columns]=(int)count;
+    for (int x=0;x<art.columns-1;x++)
+        for (int a=art.offsets[x];a<art.offsets[x+1];a++) {
+            int match=-1,matches=0;
+            for (int b=art.offsets[x+1];b<art.offsets[x+2];b++)
+                if (art.spans[a].top<art.spans[b].bottom && art.spans[b].top<art.spans[a].bottom) {match=b;matches++;}
+            if (matches!=1) continue;
+            int reverse=0;
+            for (int b=art.offsets[x];b<art.offsets[x+1];b++)
+                reverse+=art.spans[b].top<art.spans[match].bottom && art.spans[match].top<art.spans[b].bottom;
+            if (reverse==1) {art.spans[a].next=match;art.spans[match].previous=a;}
+        }
+    int *queue=malloc((size_t)image.width*(size_t)image.height*sizeof(*queue));
+    if (!queue) abort();
+    size_t first=0,last=0;
+    for (int i=0;i<image.width*image.height;i++) {
+        if (pixels[i].a>32) {pixels[i].a=255;queue[last++]=i;}
+        else pixels[i].a=0;
+    }
+    while (first<last) {
+        int index=queue[first++],x=index%image.width,y=index/image.width;
+        const int adjacent[4]={x?index-1:index,x+1<image.width?index+1:index,
+            y?index-image.width:index,y+1<image.height?index+image.width:index};
+        for (int i=0;i<4;i++) if (!pixels[adjacent[i]].a) {
+            pixels[adjacent[i]]=pixels[index];queue[last++]=adjacent[i];
+        }
+    }
+    free(queue);
+    Image opaque={pixels,image.width,image.height,1,PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    art.texture=LoadTextureFromImage(opaque);
+    GenTextureMipmaps(&art.texture);
     SetTextureFilter(art.texture,TEXTURE_FILTER_POINT);
+    rlTextureParameters(art.texture.id,RL_TEXTURE_MIN_FILTER,RL_TEXTURE_FILTER_NEAREST_MIP_LINEAR);
     UnloadImageColors(pixels);
     UnloadImage(image);
     return art;
@@ -161,12 +206,16 @@ void gostek_init(void) {
 
 void gostek_fire(int id,uint64_t tick) { fire_until[id]=tick+2; }
 
-static void triangle(MeshPart *part,Vertex a,Vertex b,Vertex c,Vector3 outward) {
+static void triangle(MeshPart *part,Vertex a,Vertex b,Vertex c,Vector3 outward,const Vector3 smooth[3]) {
     Vector3 normal=Vector3Normalize(Vector3CrossProduct(Vector3Subtract(b.position,a.position),Vector3Subtract(c.position,a.position)));
+    Vector3 normals[3]={normal,normal,normal};
+    if (smooth) memcpy(normals,smooth,sizeof(normals));
     if (Vector3DotProduct(normal,outward)<0) {
         Vertex swap=b;b=c;c=swap;
         normal=Vector3Negate(normal);
+        if (smooth) {Vector3 n=normals[1];normals[1]=normals[2];normals[2]=n;}
     }
+    if (!smooth) normals[0]=normals[1]=normals[2]=normal;
     size_t count=(size_t)part->mesh.vertexCount;
     if (count+3>part->capacity) {
         part->capacity=part->capacity?part->capacity*2:96;
@@ -176,15 +225,16 @@ static void triangle(MeshPart *part,Vertex a,Vertex b,Vertex c,Vector3 outward) 
         assert(part->mesh.vertices && part->mesh.normals && part->mesh.texcoords);
     }
     Vertex vertices[3]={a,c,b};
+    Vector3 ordered[3]={normals[0],normals[2],normals[1]};
     for (int i=0;i<3;i++) {
         Vector3 position=vertices[i].position;
         size_t index=count+(size_t)i;
         part->mesh.vertices[index*3]=position.x;
         part->mesh.vertices[index*3+1]=position.y;
         part->mesh.vertices[index*3+2]=position.z;
-        part->mesh.normals[index*3]=normal.x;
-        part->mesh.normals[index*3+1]=normal.y;
-        part->mesh.normals[index*3+2]=normal.z;
+        part->mesh.normals[index*3]=ordered[i].x;
+        part->mesh.normals[index*3+1]=ordered[i].y;
+        part->mesh.normals[index*3+2]=ordered[i].z;
         part->mesh.texcoords[index*2]=vertices[i].uv.x;
         part->mesh.texcoords[index*2+1]=vertices[i].uv.y;
         if (index==0) part->bounds=(BoundingBox){position,position};
@@ -347,37 +397,61 @@ static void loft(Vector3 a,Vector3 b,Vector3 lateral,float width,float depth,con
         cached->parts[PART_SIDE].texture=art.side;
         cached->parts[PART_ATLAS].texture=turnaround;
         cached->parts[PART_CAP].texture=cached->parts[PART_CROWN].texture=(Texture2D){.id=rlGetTextureIdDefault()};
-        enum { SIDES=12 };
-        for (int s=0;s<SIDES;s++) {
-            float angle0=2*PI*(float)s/SIDES,angle1=2*PI*(float)(s+1)/SIDES;
+        int sides=art.side.id==body_side[2].id?20:
+            art.side.id==body_side[0].id || art.side.id==body_side[5].id || art.side.id==body_side[6].id?16:12;
+        int cloth=-1;
+        for (int i=3;i<=6;i++) if (art.side.id==body_side[i].id) cloth=i-3;
+        for (int s=0;s<sides;s++) {
+            float angle0=2*PI*(float)s/sides,angle1=2*PI*(float)(s+1)/sides;
             float side=sinf((angle0+angle1)*.5f);
             int head_profile=art.side.id==body_side[2].id && fabsf(side)<=.5f;
-            int projection=art.front.width>0 && (fabsf(side)>.5f || head_profile);
+            int detailed=art.side.id==body_side[7].id || art.side.id==body_side[8].id || art.side.id==body_side[9].id;
+            int projection=cloth>=0 || (art.front.width>0 && (fabsf(side)>.5f || head_profile || detailed));
             Rectangle crop=side>0 ? art.front:art.back;
             if (head_profile) crop=cosf((angle0+angle1)*.5f)>0 ? (Rectangle){657,62,143,151}:(Rectangle){1678,62,143,151};
             MeshPart *part=&cached->parts[projection?PART_ATLAS:PART_SIDE];
             for (int r=0;r<count-1;r++) {
                 Vertex v[4];
+                Vector3 normals[4];
                 for (int i=0;i<4;i++) {
-                    Ring ring=rings[r+(i==1 || i==2)];
+                    int index=r+(i==1 || i==2);
+                    Ring ring=rings[index];
                     float angle=(i<2 ? angle0:angle1);
-                    float x=cosf(angle)*ring.width,y=sinf(angle)*ring.depth;
+                    float cosine=cosf(angle),sine=sinf(angle);
+                    float x=cosine*ring.width,y=sine*ring.depth;
                     v[i].position=(Vector3){x,ring.t,y};
-                    if (projection) {
+                    if (ring.width==0) normals[i]=(Vector3){0,index==0?-1:1,0};
+                    else {
+                        Ring before=rings[index?index-1:index],after=rings[index+1<count?index+1:index];
+                        float dw=(after.width-before.width)/(after.t-before.t),dd=(after.depth-before.depth)/(after.t-before.t);
+                        normals[i]=Vector3Normalize((Vector3){cosine*ring.depth,
+                            -cosine*cosine*dw*ring.depth-sine*sine*dd*ring.width,sine*ring.width});
+                    }
+                    if (cloth>=0) {
+                        static const Vector2 from[4][2]={{{188,574},{1178,574}},{{169,628},{1159,628}},
+                            {{145,279},{1135,279}},{{125,313},{1115,313}}};
+                        static const Vector2 to[4][2]={{{213,504},{1203,504}},{{188,574},{1178,574}},
+                            {{125,313},{1115,313}},{{79,388},{1069,388}}};
+                        static const float halfwidth[4]={24,24,23,25};
+                        int view=side>0?0:1;
+                        Vector2 a=from[cloth][view],b=to[cloth][view];
+                        Vector2 along=Vector2Normalize(Vector2Subtract(b,a));
+                        float across=(side>0?-x:x)*halfwidth[cloth];
+                        Vector2 uv=Vector2Add(Vector2Lerp(a,b,ring.t),(Vector2){-along.y*across,along.x*across});
+                        v[i].uv=(Vector2){uv.x/turnaround.width,uv.y/turnaround.height};
+                    } else if (projection) {
                         float u=side>0 ? .5f-.5f*x:.5f+.5f*x;
                         if (head_profile) u=cosf((angle0+angle1)*.5f)>0 ? .5f+.5f*y:.5f-.5f*y;
                         v[i].uv=(Vector2){(crop.x+u*crop.width)/turnaround.width,(crop.y+(1-ring.t)*crop.height)/turnaround.height};
                         if (art.side.id==body_side[2].id && ring.t>=.9f)
-                            v[i].uv=(Vector2){255.0f/turnaround.width,80.0f/turnaround.height};
+                            v[i].uv=(Vector2){(crop.x+.5f*crop.width)/turnaround.width,(crop.y+18)/turnaround.height};
                     } else {
                         v[i].uv=(Vector2){ring.t,.5f+.45f*y};
-                        if (art.side.id==body_side[5].id || art.side.id==body_side[6].id)
-                            v[i].uv=(Vector2){.2f+.6f*ring.t,.5f+.3f*y};
                     }
                 }
                 Vector3 outside=(Vector3){cosf((angle0+angle1)*.5f),0,side};
-                if (rings[r+1].width>0) triangle(part,v[0],v[1],v[2],outside);
-                if (rings[r].width>0) triangle(part,v[0],v[2],v[3],outside);
+                if (rings[r+1].width>0) triangle(part,v[0],v[1],v[2],outside,(Vector3[3]){normals[0],normals[1],normals[2]});
+                if (rings[r].width>0) triangle(part,v[0],v[2],v[3],outside,(Vector3[3]){normals[0],normals[2],normals[3]});
             }
             int cloth_cap=art.side.id==body_side[5].id || art.side.id==body_side[6].id;
             int head_cap=art.side.id==body_side[2].id;
@@ -392,7 +466,7 @@ static void loft(Vector3 a,Vector3 b,Vector3 lateral,float width,float depth,con
                 }
                 if (projection) cap.uv=edges[0].uv=edges[1].uv=(Vector2){(crop.x+.5f*crop.width)/turnaround.width,(crop.y+(end?8:crop.height-3))/turnaround.height};
                 MeshPart *cap_part=cloth_cap||head_cap?&cached->parts[head_cap&&end?PART_CROWN:PART_CAP]:part;
-                triangle(cap_part,cap,edges[0],edges[1],(Vector3){0,end?1:-1,0});
+                triangle(cap_part,cap,edges[0],edges[1],(Vector3){0,end?1:-1,0},NULL);
             }
         }
         for (int i=0;i<PART_COUNT;i++) if(cached->parts[i].mesh.vertexCount) UploadMesh(&cached->parts[i].mesh,false);
@@ -413,39 +487,45 @@ static void inflate_draw(InflatedArt *art,Vector3 origin,Vector3 along,Vector3 l
         assert(cached);
         cached->thickness=thickness;cached->part.texture=art->texture;
         cached->next=art->meshes;art->meshes=cached;
-        enum { SIDES=8 };
-        for (int x=0;x<art->columns;x++) {
-            if (art->bottom[x]<=art->top[x]) continue;
-            float bounds[2][2]={{art->top[x],art->bottom[x]},{art->top[x],art->bottom[x]}};
-            if (x+1<art->columns && art->bottom[x+1]>art->top[x+1]) {
-                bounds[1][0]=art->top[x+1];bounds[1][1]=art->bottom[x+1];
-            }
-            for (int s=0;s<SIDES;s++) {
+        static const Vector2 profile[8]={{-1,1},{1,1},{1,.65f},{1,-.65f},{1,-1},{-1,-1},{-1,-.65f},{-1,.65f}};
+        for (int x=0;x<art->columns;x++) for (int run=art->offsets[x];run<art->offsets[x+1];run++) {
+            ArtSpan span=art->spans[run];
+            ArtSpan ends[2]={span,span.next<0?span:art->spans[span.next]};
+            for (int s=0;s<8;s++) {
                 Vertex v[4];
                 for (int i=0;i<4;i++) {
-                    int end=i==1 || i==2;
-                    float angle=2*PI*(float)(s+(i>=2))/SIDES;
-                    float top=bounds[end][0],bottom=bounds[end][1];
-                    float py=(top+bottom)*.5f+sinf(angle)*(bottom-top)*.5f;
+                    int end=i==1 || i==2,index=(s+(i>=2))%8;
+                    float top=ends[end].top,bottom=ends[end].bottom;
                     float halfdepth=fminf(thickness,(bottom-top)*.55f/image_scale);
+                    float inset=fminf((bottom-top)*.13f,halfdepth*.4f*image_scale);
+                    float radius=(bottom-top)*.5f-((index==0 || index==1 || index==4 || index==5)?inset:0);
+                    Vector2 point=art->profile==ART_ROUND?(Vector2){sinf(2*PI*index/8),cosf(2*PI*index/8)}:profile[index];
+                    if (art->profile==ART_ROUND) radius=(bottom-top)*.5f;
+                    float py=(top+bottom)*.5f+point.x*radius;
                     float image_x=art->vertical?py:(float)(x+end);
                     float image_y=art->vertical?(float)(x+end):py;
-                    v[i].position=(Vector3){image_x/image_scale,image_y/image_scale,cosf(angle)*halfdepth};
-                    v[i].uv=(Vector2){image_x/art->texture.width,image_y/art->texture.height};
+                    v[i].position=(Vector3){image_x/image_scale,image_y/image_scale,point.y*halfdepth};
+                    float sample_y=fminf(bottom-.5f,fmaxf(top+.5f,py));
+                    float sample_x=(float)x+(end && span.next>=0?1.5f:.5f);
+                    v[i].uv=art->vertical?(Vector2){sample_y/art->texture.width,sample_x/art->texture.height}:
+                        (Vector2){sample_x/art->texture.width,sample_y/art->texture.height};
                 }
-                Vector3 outside=(Vector3){art->vertical?sinf(2*PI*((float)s+.5f)/SIDES):0,
-                    art->vertical?0:sinf(2*PI*((float)s+.5f)/SIDES),cosf(2*PI*((float)s+.5f)/SIDES)};
-                triangle(&cached->part,v[0],v[1],v[2],outside);
-                triangle(&cached->part,v[0],v[2],v[3],outside);
+                Vector2 edge=Vector2Add(profile[s],profile[(s+1)%8]);
+                if (art->profile==ART_ROUND) edge=(Vector2){sinf(2*PI*((float)s+.5f)/8),cosf(2*PI*((float)s+.5f)/8)};
+                Vector3 outside={art->vertical?edge.x:0,art->vertical?0:edge.x,edge.y};
+                triangle(&cached->part,v[0],v[1],v[2],outside,NULL);
+                triangle(&cached->part,v[0],v[2],v[3],outside,NULL);
                 for (int end=0;end<2;end++) {
-                    if ((!end && x>0 && art->bottom[x-1]>art->top[x-1]) ||
-                        (end && x+1<art->columns && art->bottom[x+1]>art->top[x+1])) continue;
-                    float middle=(bounds[end][0]+bounds[end][1])*.5f;
+                    if (end?span.next>=0:span.previous>=0) continue;
+                    float middle=(ends[end].top+ends[end].bottom)*.5f;
                     float image_x=art->vertical?middle:(float)(x+end);
                     float image_y=art->vertical?(float)(x+end):middle;
-                    Vector3 center=(Vector3){image_x/image_scale,image_y/image_scale,0};
-                    Vertex cap={center,v[end].uv};
-                    triangle(&cached->part,cap,v[end?1:0],v[end?2:3],art->vertical?(Vector3){0,end?1:-1,0}:(Vector3){end?1:-1,0,0});
+                    Vector3 center={image_x/image_scale,image_y/image_scale,0};
+                    Vector2 uv=art->vertical?(Vector2){middle/art->texture.width,((float)x+.5f)/art->texture.height}:
+                        (Vector2){((float)x+.5f)/art->texture.width,middle/art->texture.height};
+                    Vertex cap={center,uv},a=v[end?1:0],b=v[end?2:3];
+                    a.uv=b.uv=uv;
+                    triangle(&cached->part,cap,a,b,art->vertical?(Vector3){0,end?1:-1,0}:(Vector3){end?1:-1,0,0},NULL);
                 }
             }
         }
@@ -530,8 +610,8 @@ void gostek_draw(const Actor *actor,int id,uint64_t tick,float alpha,int jetting
     SurfaceArt shirt={body_side[0],{176,210,160,196},{1169,210,155,196},shirt_color,shirt_color};
     SurfaceArt trouser={body_side[3],{168,515,54,113},{1153,515,52,113},pants,WHITE};
     SurfaceArt sleeve={.side=body_side[5],.color=shirt_color,.atlas_color=shirt_color};
-    SurfaceArt flesh={.side=body_side[7],.color=skin,.atlas_color=WHITE};
-    SurfaceArt boot={body_side[jetting && actor->fuel>0?9:8],{110,650,99,95},{1090,650,95,95},WHITE,WHITE};
+    SurfaceArt flesh={body_side[7],{51,430,30,42},{1041,430,30,42},skin,WHITE};
+    SurfaceArt boot={body_side[jetting && actor->fuel>0?9:8],{126,662,75,78},{1116,662,75,78},WHITE,WHITE};
     SurfaceArt dark={.side=body_side[1],.color={47,49,47,255},.atlas_color=WHITE};
     instance_count=0;
     float opacity=actor->spawn_protection_ticks>=0 ? fabsf(100+70*sinf((float)tick*SRC_ILUMINATESPEED))/255:1;
@@ -543,9 +623,9 @@ void gostek_draw(const Actor *actor,int id,uint64_t tick,float alpha,int jetting
     for (int side=0;side<2;side++) {
         int h=side?6:5,k=side?3:4,f=side?2:1,s=side?11:10,e=side?14:13,w=side?15:16;
         if (!(actor->ragdoll.severed&(1u<<(side?1:3))))
-            loft(p[k],p[h],right,1.5f,1.45f,limb,5,trouser);
+            loft(Vector3Add(p[k],Vector3Scale(Vector3Normalize(Vector3Subtract(p[k],p[h])),.65f)),p[h],right,1.5f,1.45f,limb,5,trouser);
         trouser.side=body_side[4];
-        loft(p[f],p[k],right,1.4f,1.4f,shin,4,trouser);
+        loft(p[f],Vector3Add(p[k],Vector3Scale(Vector3Normalize(Vector3Subtract(p[k],p[f])),.45f)),right,1.4f,1.4f,shin,4,trouser);
         trouser.side=body_side[3];
         Vector3 ankle=p[f];
         Vector3 foot_up=actor->life==DEAD ? Vector3Normalize(Vector3Subtract(p[k],p[f])):(Vector3){0,1,0};
@@ -658,11 +738,11 @@ void gostek_free(void) {
     UnloadTexture(turnaround);
     for (int i=0;i<10;i++) UnloadTexture(body_side[i]);
     for (int i=0;i<WEAPON_COUNT;i++) {
-        if (weapon_visuals[i].file) { UnloadTexture(guns[i].texture);free(guns[i].top); }
-        if (clip_files[i]) { UnloadTexture(magazines[i].texture);free(magazines[i].top); }
+        if (weapon_visuals[i].file) { UnloadTexture(guns[i].texture);free(guns[i].offsets);free(guns[i].spans); }
+        if (clip_files[i]) { UnloadTexture(magazines[i].texture);free(magazines[i].offsets);free(magazines[i].spans); }
     }
     UnloadTexture(grenade.texture);
-    free(grenade.top);
-    UnloadTexture(bow_string.texture);free(bow_string.top);
-    UnloadTexture(bow_arrow.texture);free(bow_arrow.top);
+    free(grenade.offsets);free(grenade.spans);
+    UnloadTexture(bow_string.texture);free(bow_string.offsets);free(bow_string.spans);
+    UnloadTexture(bow_arrow.texture);free(bow_arrow.offsets);free(bow_arrow.spans);
 }
