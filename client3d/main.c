@@ -595,6 +595,7 @@ int main(int argc,char **argv) {
             for (int i=0;i<ACTOR_COUNT;++i) {
                 float visibility=i==local_actor && !map_capture(view_mode) ? shoulder_view.body_visibility : 1;
                 gostek_draw(&scene->actors[i],i,view.tick,scene_alpha,(last_held[i]&INPUT_JETS)!=0,visibility,
+                    scene->actors[i].life==ALIVE ? aim_poses[i] :
                     session==CLIENT ? network_actor_pose(network,i) : NULL);
             }
             gostek_end();

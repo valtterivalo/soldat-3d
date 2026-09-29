@@ -9,7 +9,7 @@
 #include <string.h>
 
 typedef struct { Vec3 normal; float distance; } Plane;
-typedef struct { size_t first; unsigned count; Vec3 min,max; } Hull;
+typedef struct { size_t first; unsigned count,ray_count; Vec3 min,max; } Hull;
 typedef struct { Vec3 min,max; size_t solid,end; } WorldBranch;
 
 WorldSolid *world_solids;
@@ -169,15 +169,19 @@ static void world_branch(size_t *indices,size_t count)
 {
     WorldBranch *branch=&world_tree[world_tree_count++];
     branch->min=hulls[indices[0]].min;branch->max=hulls[indices[0]].max;
+    Vec3 center_low=add(branch->min,branch->max),center_high=center_low;
     for(size_t i=1;i<count;++i) {
         const Hull *hull=&hulls[indices[i]];
+        Vec3 center=add(hull->min,hull->max);
+        center_low.x=fminf(center_low.x,center.x);center_low.y=fminf(center_low.y,center.y);center_low.z=fminf(center_low.z,center.z);
+        center_high.x=fmaxf(center_high.x,center.x);center_high.y=fmaxf(center_high.y,center.y);center_high.z=fmaxf(center_high.z,center.z);
         branch->min.x=fminf(branch->min.x,hull->min.x);branch->min.y=fminf(branch->min.y,hull->min.y);branch->min.z=fminf(branch->min.z,hull->min.z);
         branch->max.x=fmaxf(branch->max.x,hull->max.x);branch->max.y=fmaxf(branch->max.y,hull->max.y);branch->max.z=fmaxf(branch->max.z,hull->max.z);
     }
     branch->solid=SIZE_MAX;
     if(count==1)branch->solid=indices[0];
     else {
-        Vec3 span=sub(branch->max,branch->min);
+        Vec3 span=sub(center_high,center_low);
         int (*compare)(const void *,const void *)=span.x>span.y && span.x>span.z ? hull_x : span.y>span.z ? hull_y : hull_z;
         qsort(indices,count,sizeof(*indices),compare);
         world_branch(indices,count/2);world_branch(indices+count/2,count-count/2);
@@ -240,7 +244,7 @@ static void world_build_hulls(void)
         if(plane_count+count>plane_capacity) {
             plane_capacity=2*(plane_count+count);hull_planes=realloc(hull_planes,plane_capacity*sizeof(*hull_planes));if(!hull_planes)abort();
         }
-        hulls[i].first=plane_count;hulls[i].count=count;
+        hulls[i].first=plane_count;hulls[i].count=count;hulls[i].ray_count=solid->face_count+6;
         memcpy(hull_planes+plane_count,planes,count*sizeof(*planes));plane_count+=count;
     }
     free(world_tree);world_tree_count=0;
@@ -1051,7 +1055,7 @@ static WorldHit world_trace_mode(Vec3 start, Vec3 end, Vec3 extents, WorldQuery 
         int inside = 1;
         Vec3 normal = {0, 0, 0};
         Vec3 nearest_normal = {0, 0, 0};
-        unsigned plane_count=extents.x==0 && extents.y==0 && extents.z==0 ? world_solids[i].face_count+6 : hull->count;
+        unsigned plane_count=extents.x==0 && extents.y==0 && extents.z==0 ? hull->ray_count : hull->count;
         for (unsigned j=0;j<plane_count;++j) {
             Plane plane=hull_planes[hull->first+j];
             float distance = plane.distance + fabsf(plane.normal.x) * extents.x +
@@ -1079,6 +1083,7 @@ static WorldHit world_trace_mode(Vec3 start, Vec3 end, Vec3 extents, WorldQuery 
             } else if (to > from && fraction < leave) {
                 leave = fraction;
             }
+            if(enter>=leave)break;
         }
         if(inside && (interior.box<0 || (int)i<interior.box)) {
             interior=(WorldHit){0,nearest_normal,(int)i};

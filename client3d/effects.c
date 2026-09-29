@@ -3,6 +3,7 @@
 #include "ragdoll.h"
 #include "raymath.h"
 #include "rlgl.h"
+#include "external/glad.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -364,12 +365,9 @@ void effects_draw(Effects *effects, const Game *game, Camera3D camera, float alp
     size_t instance_count=0;
     for(size_t i=0;i<effects->batch_count;++i)instance_count+=effects->batches[i].count;
     if(instance_count>effects->instance_capacity) {
-        if(effects->instance_buffer)rlUnloadVertexBuffer(effects->instance_buffer);
         effects->instance_capacity=instance_count*2;
         effects->instance_data=realloc(effects->instance_data,effects->instance_capacity*sizeof(*effects->instance_data));
         if(!effects->instance_data)abort();
-        effects->instance_buffer=rlLoadVertexBuffer(NULL,(int)(effects->instance_capacity*sizeof(*effects->instance_data)),true);
-        if(!effects->instance_buffer)abort();
     }
     size_t offset=0;
     for(size_t i=0;i<effects->batch_count;++i) {
@@ -378,7 +376,14 @@ void effects_draw(Effects *effects, const Game *game, Camera3D camera, float alp
         memcpy(effects->instance_data+offset,batch->transforms,batch->count*sizeof(*batch->transforms));
         offset+=batch->count;
     }
-    if(instance_count)rlUpdateVertexBuffer(effects->instance_buffer,effects->instance_data,(int)(instance_count*sizeof(*effects->instance_data)),0);
+    if(instance_count) {
+        if(!effects->instance_buffer) {
+            glGenBuffers(1,&effects->instance_buffer);
+            if(!effects->instance_buffer)abort();
+        }
+        rlEnableVertexBuffer(effects->instance_buffer);
+        glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)(instance_count*sizeof(*effects->instance_data)),effects->instance_data,GL_STREAM_DRAW);
+    }
     Shader shader=effects->instance_shader;
     rlEnableShader(shader.id);
     rlSetUniformMatrix(shader.locs[SHADER_LOC_MATRIX_MVP],MatrixMultiply(rlGetMatrixModelview(),rlGetMatrixProjection()));

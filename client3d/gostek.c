@@ -5,6 +5,7 @@
 #include "generated_rules.h"
 #include "raymath.h"
 #include "rlgl.h"
+#include "external/glad.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -276,11 +277,12 @@ static void flush_groups(void) {
     size_t count=0;
     for (size_t i=0;i<group_count;i++) count+=groups[i].count;
     if (count>buffer_capacity) {
-        if (instance_buffer) rlUnloadVertexBuffer(instance_buffer);
         buffer_capacity=count*2;
         buffer_data=realloc(buffer_data,buffer_capacity*sizeof(*buffer_data));
         assert(buffer_data);
-        instance_buffer=rlLoadVertexBuffer(NULL,(int)(buffer_capacity*sizeof(InstanceData)),true);
+    }
+    if (!instance_buffer) {
+        glGenBuffers(1,&instance_buffer);
         if (!instance_buffer) abort();
     }
     size_t offset=0;
@@ -288,7 +290,8 @@ static void flush_groups(void) {
         memcpy(buffer_data+offset,groups[i].data,groups[i].count*sizeof(InstanceData));
         offset+=groups[i].count;
     }
-    rlUpdateVertexBuffer(instance_buffer,buffer_data,(int)(count*sizeof(InstanceData)),0);
+    rlEnableVertexBuffer(instance_buffer);
+    glBufferData(GL_ARRAY_BUFFER,(GLsizeiptr)(count*sizeof(InstanceData)),buffer_data,GL_STREAM_DRAW);
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
     rlEnableShader(opaque_shader.id);

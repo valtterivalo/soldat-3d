@@ -23,8 +23,8 @@ static Vec3 chest(const Actor *actor) {
 }
 
 static int visible(const Actor *actor,Vec3 origin,Vec3 target) {
-    return world_trace_for(origin,target,v3(0,0,0),
-        (WorldQuery){WORLD_TRACE_BULLET,actor->team,WORLD_NO_FLAG}).box<0;
+    return !world_occluded_for(origin,target,
+        (WorldQuery){WORLD_TRACE_BULLET,actor->team,WORLD_NO_FLAG});
 }
 
 typedef struct {Vec3 target;float time;int reachable;} Aim;
@@ -114,11 +114,10 @@ Input bot_input(Game *game,int index) {
             int heard=other->controls&INPUT_FIRE;
             if(distance>70 && dot(delta,direction(actor->yaw,actor->pitch))<.15f*distance &&
                 !(heard && distance<450))continue;
-            if(!visible(actor,eye,point))continue;
             float score=distance*(i==memory->target && other->spawn_id==memory->target_spawn ? .62f : 1);
             if(other->carried_flag!=FLAG_NONE)score*=.65f;
             if(other->spawn_protection_ticks>=0)score*=2;
-            if(score>=best)continue;
+            if(score>=best || !visible(actor,eye,point))continue;
             best=score;selected=i;
         }
         if(selected>=0) {
@@ -206,9 +205,10 @@ Input bot_input(Game *game,int index) {
             for(size_t i=0;i<world_nav_node_count;++i) {
                 Vec3 point=world_nav_nodes[i].position;
                 float travel=length(sub(point,actor->position));
-                if(travel>170 || travel<12 || visible(actor,target_point,add(point,v3(0,8,0))))continue;
+                if(travel>170 || travel<12)continue;
                 float score=travel+.12f*length(sub(point,target_point));
-                if(score<best){best=score;memory->cover=point;}
+                if(score<best && !visible(actor,target_point,add(point,v3(0,8,0))))
+                    {best=score;memory->cover=point;}
             }
         }
         approach=memory->cover;intent=BOT_RETREAT;

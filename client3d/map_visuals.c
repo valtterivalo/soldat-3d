@@ -40,34 +40,91 @@ static Texture2D texture_load(const char *path)
     return texture;
 }
 
-static void mesh_triangle(Mesh *mesh, int *index, MapVertex a, MapVertex b, MapVertex c)
-{
-    MapVertex vertices[] = {a, b, c};
-    for (int i = 0; i < 3; ++i) {
-        int n = (*index)++;
-        MapVertex v = vertices[i];
-        mesh->vertices[n * 3] = v.position.x;
-        mesh->vertices[n * 3 + 1] = v.position.y;
-        mesh->vertices[n * 3 + 2] = v.position.z;
-        if(mesh->normals) {
-            mesh->normals[n*3]=v.normal.x;
-            mesh->normals[n*3+1]=v.normal.y;
-            mesh->normals[n*3+2]=v.normal.z;
-        }
-        if(mesh->texcoords) {
-            mesh->texcoords[n * 2] = v.uv.x;
-            mesh->texcoords[n * 2 + 1] = v.uv.y;
-        }
-        mesh->colors[n * 4] = v.color.r;
-        mesh->colors[n * 4 + 1] = v.color.g;
-        mesh->colors[n * 4 + 2] = v.color.b;
-        mesh->colors[n * 4 + 3] = v.color.a;
-    }
-}
-
 typedef struct { MapVertex *vertices; size_t count, capacity; } PropMesh;
 typedef enum { SCENERY_OPAQUE, SCENERY_MIST, SCENERY_LIGHT } SceneryKind;
 typedef struct { Texture2D texture; Color *pixels; int width, height; SceneryKind kind; } SourceArt;
+typedef enum { MESH_TERRAIN, MESH_PROP } MapMeshKind;
+typedef struct { uint32_t words[7]; } MapKey;
+enum { MESH_VERTEX_LIMIT=UINT16_MAX+1u, MESH_HASH_SLOTS=2*MESH_VERTEX_LIMIT };
+
+static unsigned mesh_slot(const unsigned *table,const MapKey *keys,const MapKey *key,unsigned slot)
+{
+    while(table[slot]!=UINT32_MAX && memcmp(&keys[table[slot]],key,sizeof(*key)))
+        slot=(slot+1)&(MESH_HASH_SLOTS-1);
+    return slot;
+}
+
+static Model mesh_indexed(const PropMesh *build,MapMeshKind kind)
+{
+    unsigned *table=malloc(MESH_HASH_SLOTS*sizeof(*table));
+    MapKey *keys=malloc(MESH_VERTEX_LIMIT*sizeof(*keys));
+    unsigned short *indices=malloc(build->count*sizeof(*indices));
+    if(!table || !keys || !indices)abort();
+    Model model={.transform=MatrixIdentity(),.materialCount=1};
+    model.materials=MemAlloc(sizeof(*model.materials));
+    if(!model.materials)abort();
+    model.materials[0]=LoadMaterialDefault();
+    for(size_t first=0;first<build->count;) {
+        memset(table,255,MESH_HASH_SLOTS*sizeof(*table));
+        unsigned unique=0;size_t count=0;
+        while(first<build->count) {
+            MapKey triangle[3]={0};unsigned hashes[3];
+            for(unsigned corner=0;corner<3;++corner) {
+                const MapVertex *vertex=&build->vertices[first+corner];
+                memcpy(triangle[corner].words,&vertex->position,sizeof(vertex->position));
+                memcpy(triangle[corner].words+3,&vertex->normal,kind==MESH_TERRAIN ? sizeof(Vec3) : sizeof(Vector2));
+                memcpy(triangle[corner].words+6,&vertex->color,sizeof(vertex->color));
+                unsigned hash=2166136261u;
+                const unsigned char *bytes=(const unsigned char *)&triangle[corner];
+                for(unsigned byte=0;byte<sizeof(MapKey);++byte)hash=(hash^bytes[byte])*16777619u;
+                hashes[corner]=hash&(MESH_HASH_SLOTS-1);
+            }
+            if(unique+3>MESH_VERTEX_LIMIT) {
+                unsigned added=0;
+                for(unsigned corner=0;corner<3;++corner) {
+                    unsigned slot=mesh_slot(table,keys,&triangle[corner],hashes[corner]);
+                    if(table[slot]!=UINT32_MAX)continue;
+                    unsigned earlier=0;
+                    while(earlier<corner && memcmp(&triangle[earlier],&triangle[corner],sizeof(MapKey)))++earlier;
+                    added+=earlier==corner;
+                }
+                if(unique+added>MESH_VERTEX_LIMIT)break;
+            }
+            for(unsigned corner=0;corner<3;++corner) {
+                unsigned slot=mesh_slot(table,keys,&triangle[corner],hashes[corner]);
+                if(table[slot]==UINT32_MAX) {
+                    keys[unique]=triangle[corner];
+                    table[slot]=unique++;
+                }
+                indices[count++]=(unsigned short)table[slot];
+            }
+            first+=3;
+        }
+        Mesh mesh={.vertexCount=(int)unique,.triangleCount=(int)(count/3)};
+        mesh.vertices=MemAlloc(unique*3*sizeof(float));
+        mesh.colors=MemAlloc(unique*4);
+        mesh.indices=MemAlloc((unsigned)count*sizeof(*mesh.indices));
+        if(kind==MESH_TERRAIN)mesh.normals=MemAlloc(unique*3*sizeof(float));
+        else mesh.texcoords=MemAlloc(unique*2*sizeof(float));
+        if(!mesh.vertices || !mesh.colors || !mesh.indices ||
+            (kind==MESH_TERRAIN ? !mesh.normals : !mesh.texcoords))abort();
+        for(unsigned vertex=0;vertex<unique;++vertex) {
+            memcpy(mesh.vertices+vertex*3,keys[vertex].words,3*sizeof(float));
+            memcpy(mesh.colors+vertex*4,keys[vertex].words+6,4);
+            if(kind==MESH_TERRAIN)memcpy(mesh.normals+vertex*3,keys[vertex].words+3,3*sizeof(float));
+            else memcpy(mesh.texcoords+vertex*2,keys[vertex].words+3,2*sizeof(float));
+        }
+        memcpy(mesh.indices,indices,count*sizeof(*indices));
+        UploadMesh(&mesh,false);
+        model.meshes=MemRealloc(model.meshes,(unsigned)(model.meshCount+1)*sizeof(*model.meshes));
+        model.meshMaterial=MemRealloc(model.meshMaterial,(unsigned)(model.meshCount+1)*sizeof(*model.meshMaterial));
+        if(!model.meshes || !model.meshMaterial)abort();
+        model.meshes[model.meshCount]=mesh;
+        model.meshMaterial[model.meshCount++]=0;
+    }
+    free(indices);free(keys);free(table);
+    return model;
+}
 
 static void terrain_triangle(PropMesh *mesh, MapVertex a, MapVertex b, MapVertex c, Vec3 normal, float reach)
 {
@@ -758,19 +815,8 @@ void map_visuals_init(void)
         }
     }
     free(corners);
-    Mesh mesh={0};
-    mesh.vertexCount=(int)terrain_build.count;
-    mesh.triangleCount=mesh.vertexCount/3;
-    mesh.vertices=MemAlloc((unsigned)mesh.vertexCount*3*sizeof(float));
-    mesh.normals=MemAlloc((unsigned)mesh.vertexCount*3*sizeof(float));
-    mesh.colors=MemAlloc((unsigned)mesh.vertexCount*4);
-    if(!mesh.vertices || !mesh.normals || !mesh.colors)abort();
-    int index=0;
-    for(size_t i=0;i<terrain_build.count;i+=3)
-        mesh_triangle(&mesh,&index,terrain_build.vertices[i],terrain_build.vertices[i+1],terrain_build.vertices[i+2]);
+    terrain=mesh_indexed(&terrain_build,MESH_TERRAIN);
     free(terrain_build.vertices);
-    UploadMesh(&mesh,false);
-    terrain=LoadModelFromMesh(mesh);
     terrain_shader=LoadShaderFromMemory(
         "#version 330\n"
         "in vec3 vertexPosition;in vec3 vertexNormal;in vec4 vertexColor;\n"
@@ -880,18 +926,7 @@ void map_visuals_init(void)
             first=end;
         }
         free(normals);
-        Mesh prop={0};
-        prop.vertexCount=(int)build[i].count;
-        prop.triangleCount=prop.vertexCount/3;
-        prop.vertices=MemAlloc((unsigned)prop.vertexCount*3*sizeof(float));
-        prop.texcoords=MemAlloc((unsigned)prop.vertexCount*2*sizeof(float));
-        prop.colors=MemAlloc((unsigned)prop.vertexCount*4);
-        if (!prop.vertices || !prop.texcoords || !prop.colors) abort();
-        int n=0;
-        for (size_t v=0;v<build[i].count;v+=3)
-            mesh_triangle(&prop,&n,build[i].vertices[v],build[i].vertices[v+1],build[i].vertices[v+2]);
-        UploadMesh(&prop,false);
-        props[i]=LoadModelFromMesh(prop);
+        props[i]=mesh_indexed(&build[i],MESH_PROP);
         if (strncmp(world_scenery[i],"grass",5) && !foliage_art(world_scenery[i]))
             props[i].materials[0].maps[MATERIAL_MAP_DIFFUSE].texture=art[i].texture;
         free(build[i].vertices);
